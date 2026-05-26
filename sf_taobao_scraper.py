@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第三版)
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第五版)
 改进：
   - 断点续爬（checkpoint），中断后可从上次位置继续
   - 自动下载 msedgedriver（npmmirror 国内镜像）
@@ -298,39 +298,16 @@ class Checkpoint:
 
 
 # ============================================================
-# 列表页爬取
+# 列表页爬取（Selenium）
 # ============================================================
 
 class ListPageScraper:
-    def __init__(self, cookie):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://sf.taobao.com/",
-            "Cookie": cookie,
-        })
+    """使用 Selenium 加载列表页（页面是 JS 渲染的）"""
 
-    def _get(self, url, params=None, max_retries=3):
-        for attempt in range(max_retries):
-            try:
-                self.session.headers["User-Agent"] = random.choice(USER_AGENTS)
-                resp = self.session.get(url, params=params, timeout=30)
-                if resp.status_code == 200: return resp
-                if resp.status_code in (403, 429):
-                    logger.warning(f"HTTP {resp.status_code}，等待重试...")
-                    time.sleep(random.uniform(15, 30))
-                else:
-                    time.sleep(random.uniform(5, 10))
-            except Exception as e:
-                logger.warning(f"请求异常: {e}")
-                time.sleep(random.uniform(5, 10))
-        return None
+    def __init__(self, driver):
+        self.driver = driver
 
     def fetch_page(self, page, date_start=None, date_end=None):
-        # 构建 URL: /list/0__2___昆明.htm?auction_source=0&st_param=-1&...&page=N
-        # 城市名用 GBK 编码
         city_gbk = urllib.parse.quote(LIST_CITY.encode("gbk"))
         url = LIST_URL.format(city_gbk=city_gbk)
 
@@ -344,42 +321,92 @@ class ListPageScraper:
         if date_end:
             params["auctionStartTo"] = date_end
 
-        resp = self._get(url, params=params)
-        if not resp or "deny" in resp.url or "punish" in resp.url: return []
+        full_url = url + "?" + urllib.parse.urlencode(params)
+        logger.info(f"请求: {full_url[:100]}...")
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        try:
+            self.driver.get(full_url)
+            WebDriverWait(self.driver, 20).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            time.sleep(4)  # 等待 React 渲染
+        except TimeoutException:
+            logger.warning(f"列表页第 {page} 页加载超时")
+            return []
+
+        # 检查是否被拦截
+        cur_url = self.driver.current_url
+        if "deny" in cur_url or "punish" in cur_url:
+            logger.error("触发反爬验证，请检查 Cookie")
+            return []
+
+        page_text = self.driver.find_element(By.TAG_NAME, "body").text
 
         # 方法1: 从 script#sf-item-list-data 提取 JSON
-        script_tag = soup.find("script", {"id": "sf-item-list-data"})
-        if script_tag and script_tag.string:
-            try:
-                data = json.loads(script_tag.string.strip())
+        try:
+            script_el = self.driver.find_element(By.ID, "sf-item-list-data")
+            script_text = script_el.get_attribute("innerHTML").strip()
+            if script_text:
+                data = json.loads(script_text)
                 items = data.get("data", [])
                 if items:
-                    logger.info(f"列表页第 {page} 页：{len(items)} 条")
+                    logger.info(f"列表页第 {page} 页：{len(items)} 条 (JSON)")
                     return items
-            except json.JSONDecodeError: pass
+        except (NoSuchElementException, json.JSONDecodeError):
+            pass
 
-        # 方法2: 从 HTML 中解析（备用）
+        # 方法2: 从页面源码中找 JSON 数据
+        page_source = self.driver.page_source
+        m = re.search(r'id="sf-item-list-data"[^>]*>(.*?)</script>', page_source, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(1).strip())
+                items = data.get("data", [])
+                if items:
+                    logger.info(f"列表页第 {page} 页：{len(items)} 条 (源码JSON)")
+                    return items
+            except json.JSONDecodeError:
+                pass
+
+        # 方法3: 从页面链接直接解析
         items = []
-        for a in soup.find_all("a", href=re.compile(r"(?:susong-item|sf-item).*\.htm")):
-            href = a.get("href", "")
-            if not href.startswith("http"):
-                href = "https:" + href if href.startswith("//") else "https://sf.taobao.com" + href
-            title = a.get_text(strip=True)
-            id_m = re.search(r"(\d+)\.htm", href)
-            parent = a.find_parent("li") or a.find_parent("div")
-            price = ""
-            if parent:
-                pm = re.search(r"([\d.]+)\s*万", parent.get_text())
-                if pm: price = pm.group(0)
-            items.append({
-                "itemUrl": href, "title": title,
-                "id": id_m.group(1) if id_m else "",
-                "currentPrice": price, "status": "", "statusText": "",
-            })
+        try:
+            links = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='sf-item'], a[href*='susong-item'], a[href*='auction']")
+            seen = set()
+            for link in links:
+                href = link.get_attribute("href") or ""
+                if not href or "htm" not in href: continue
+                if href in seen: continue
+                seen.add(href)
+
+                title = link.text.strip()
+                if not title or len(title) < 5: continue
+
+                id_m = re.search(r"(\d{10,})\.htm", href)
+                item_id = id_m.group(1) if id_m else ""
+
+                # 尝试从父元素获取价格
+                price = ""
+                try:
+                    parent = link.find_element(By.XPATH, "./ancestor::li[1] | ./ancestor::div[contains(@class,'item')]")
+                    parent_text = parent.text
+                    pm = re.search(r"([\d.]+)\s*万", parent_text)
+                    if pm: price = pm.group(0)
+                except: pass
+
+                items.append({
+                    "itemUrl": href, "title": title, "id": item_id,
+                    "currentPrice": price, "status": "", "statusText": "",
+                })
+        except Exception as e:
+            logger.warning(f"HTML解析异常: {e}")
+
         if items:
             logger.info(f"列表页第 {page} 页：{len(items)} 条 (HTML)")
+        else:
+            # 调试：输出页面片段
+            logger.warning(f"列表页第 {page} 页未解析到数据")
+            logger.debug(f"页面文本前500字: {page_text[:500]}")
         return items
 
 
@@ -628,7 +655,8 @@ class SfTaobaoScraper:
         self.use_selenium = use_selenium and HAS_SELENIUM
         self.browser_type = browser_type
         self.driver_path = driver_path
-        self.list_scraper = ListPageScraper(cookie)
+        self.driver = None  # 共享的 Selenium driver
+        self.list_scraper = None
         self.detail_scraper = None
         self.results = []
         self.failed_urls = []
@@ -639,10 +667,15 @@ class SfTaobaoScraper:
     def start(self):
         self.stats["start_time"] = time.time()
         if self.use_selenium:
+            # 创建共享的 Selenium driver
             self.detail_scraper = SeleniumDetailScraper(self.cookie, self.browser_type, self.driver_path)
             self.detail_scraper.start()
+            self.driver = self.detail_scraper.driver
+            # 列表页也用同一个 driver
+            self.list_scraper = ListPageScraper(self.driver)
         else:
             self.detail_scraper = RequestsDetailScraper(self.cookie)
+            self.list_scraper = None  # Requests 模式不支持列表页
 
     def stop(self):
         if self.use_selenium and self.detail_scraper:
@@ -687,6 +720,10 @@ class SfTaobaoScraper:
         logger.info(f"日期: {date_start} ~ {date_end}")
         logger.info(f"模式: {'Selenium/' + self.browser_type.upper() if self.use_selenium else 'Requests'}")
         logger.info("=" * 60)
+
+        if not self.list_scraper:
+            logger.error("Requests 模式不支持列表页爬取，请使用 Selenium 模式")
+            return
 
         for page in range(start_page, MAX_PAGES + 1):
             logger.info(f"\n--- 列表页第 {page} 页 ---")
@@ -828,7 +865,7 @@ class SfTaobaoScraper:
 def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第三版)       ║
+║       阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第五版)       ║
 ║                                                              ║
 ║  ✨ 新功能：断点续爬 | 自动下载 driver | CSV+Excel 双输出    ║
 ╚══════════════════════════════════════════════════════════════╝
