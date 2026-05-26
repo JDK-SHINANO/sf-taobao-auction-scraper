@@ -22,6 +22,7 @@ import csv
 import zipfile
 import shutil
 import subprocess
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -65,7 +66,12 @@ KUNMING_DISTRICTS = {
 KUNMING_LOCATION_CODE = "530100"
 KUNMING_PROVINCE_CODE = "530000"
 CATEGORY_RESIDENTIAL = "50025969"
-LIST_URL = "https://sf.taobao.com/item_list.htm"
+
+# 列表页 URL 格式: /list/{province}__{status}___{city_gbk}.htm
+# 0__2 = 全省 + 已成交
+# 城市名需要用 GBK 编码
+LIST_URL = "https://sf.taobao.com/list/0__2___{city_gbk}.htm"
+LIST_CITY = "昆明"
 ITEMS_PER_PAGE = 40
 MAX_PAGES = 150
 MIN_DELAY = 2.0
@@ -322,21 +328,28 @@ class ListPageScraper:
                 time.sleep(random.uniform(5, 10))
         return None
 
-    def fetch_page(self, page, completed=True):
+    def fetch_page(self, page, date_start=None, date_end=None):
+        # 构建 URL: /list/0__2___昆明.htm?auction_source=0&st_param=-1&...&page=N
+        # 城市名用 GBK 编码
+        city_gbk = urllib.parse.quote(LIST_CITY.encode("gbk"))
+        url = LIST_URL.format(city_gbk=city_gbk)
+
         params = {
-            "location_code": KUNMING_LOCATION_CODE,
-            "category": CATEGORY_RESIDENTIAL,
             "auction_source": "0",
-            "province": KUNMING_PROVINCE_CODE,
-            "st_param": "-1", "auction_start_seg": "-1",
+            "st_param": "-1",
             "page": str(page),
         }
-        if completed: params["completed_items"] = "1"
+        if date_start:
+            params["auctionStartFrom"] = date_start
+        if date_end:
+            params["auctionStartTo"] = date_end
 
-        resp = self._get(LIST_URL, params=params)
+        resp = self._get(url, params=params)
         if not resp or "deny" in resp.url or "punish" in resp.url: return []
 
         soup = BeautifulSoup(resp.text, "lxml")
+
+        # 方法1: 从 script#sf-item-list-data 提取 JSON
         script_tag = soup.find("script", {"id": "sf-item-list-data"})
         if script_tag and script_tag.string:
             try:
@@ -346,7 +359,28 @@ class ListPageScraper:
                     logger.info(f"列表页第 {page} 页：{len(items)} 条")
                     return items
             except json.JSONDecodeError: pass
-        return []
+
+        # 方法2: 从 HTML 中解析（备用）
+        items = []
+        for a in soup.find_all("a", href=re.compile(r"(?:susong-item|sf-item).*\.htm")):
+            href = a.get("href", "")
+            if not href.startswith("http"):
+                href = "https:" + href if href.startswith("//") else "https://sf.taobao.com" + href
+            title = a.get_text(strip=True)
+            id_m = re.search(r"(\d+)\.htm", href)
+            parent = a.find_parent("li") or a.find_parent("div")
+            price = ""
+            if parent:
+                pm = re.search(r"([\d.]+)\s*万", parent.get_text())
+                if pm: price = pm.group(0)
+            items.append({
+                "itemUrl": href, "title": title,
+                "id": id_m.group(1) if id_m else "",
+                "currentPrice": price, "status": "", "statusText": "",
+            })
+        if items:
+            logger.info(f"列表页第 {page} 页：{len(items)} 条 (HTML)")
+        return items
 
 
 # ============================================================
@@ -656,7 +690,7 @@ class SfTaobaoScraper:
 
         for page in range(start_page, MAX_PAGES + 1):
             logger.info(f"\n--- 列表页第 {page} 页 ---")
-            items = self.list_scraper.fetch_page(page)
+            items = self.list_scraper.fetch_page(page, date_start, date_end)
             if not items:
                 logger.info("无数据，停止")
                 break
