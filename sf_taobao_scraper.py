@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第七版)
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第八版)
 ========================================
 全新策略：
   - 从列表页获取所有拍品 URL
@@ -73,8 +73,9 @@ KUNMING_DISTRICTS = {
 }
 
 LIST_CITY = "昆明"
-LIST_URL = "https://sf.taobao.com/list/0__2___{city_gbk}.htm"
-CATEGORY_RESIDENTIAL = "50025969"  # 住宅用房分类码（不加会混入车位、商铺等）
+# 路径格式: /list/{category}__2___{city_gbk}.htm
+# category=50025969 是住宅用房，放在路径第一段
+LIST_URL = "https://sf.taobao.com/list/50025969__2___{city_gbk}.htm"
 ITEMS_PER_PAGE = 40
 MAX_PAGES = 150
 MIN_DELAY = 2.0
@@ -259,11 +260,13 @@ class ListPageScraper:
         params = {
             "auction_source": "0",
             "st_param": "-1",
-            "category": CATEGORY_RESIDENTIAL,  # 只要住宅用房
+            "auction_start_seg": "0",
             "page": str(page),
         }
-        if date_start: params["auctionStartFrom"] = date_start
-        if date_end: params["auctionStartTo"] = date_end
+        if date_start:
+            params["auction_start_from"] = date_start
+        if date_end:
+            params["auction_start_to"] = date_end
         full_url = url + "?" + urllib.parse.urlencode(params)
 
         logger.info(f"列表页第 {page} 页: {full_url[:90]}...")
@@ -1195,7 +1198,7 @@ class SfTaobaoScraper:
 def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 法拍房数据爬取工具 (第七版)             ║
+║       阿里司法拍卖 - 法拍房数据爬取工具 (第八版)             ║
 ║                                                              ║
 ║  ✨ 全新策略：逐页提取 | 标的物介绍整表 | 附件下载            ║
 ║  ✨ 自动处理 Cookie 过期 | 断点续爬                           ║
