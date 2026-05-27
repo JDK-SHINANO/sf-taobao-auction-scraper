@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第六版)
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第七版)
 ========================================
 全新策略：
   - 从列表页获取所有拍品 URL
@@ -74,6 +74,7 @@ KUNMING_DISTRICTS = {
 
 LIST_CITY = "昆明"
 LIST_URL = "https://sf.taobao.com/list/0__2___{city_gbk}.htm"
+CATEGORY_RESIDENTIAL = "50025969"  # 住宅用房分类码（不加会混入车位、商铺等）
 ITEMS_PER_PAGE = 40
 MAX_PAGES = 150
 MIN_DELAY = 2.0
@@ -94,8 +95,11 @@ USER_AGENTS = [
 
 # 拍卖成功的关键词（页面上出现这些表示已成交/已结束）
 SUCCESS_KEYWORDS = ["已结束", "已成交", "成交确认", "竞价成功"]
-# 拍卖失败的关键词
-FAIL_KEYWORDS = ["流拍", "中止", "撤回", "已撤销", "已中止", "无人出价", "暂缓"]
+# 拍卖失败的关键词（出现任意一个 → 跳过，不下载）
+FAIL_KEYWORDS = [
+    "流拍", "中止", "撤回", "已撤销", "已中止", "暂缓",
+    "无人出价", "无人报名", "本场已流拍",
+]
 
 
 # ============================================================
@@ -252,7 +256,12 @@ class ListPageScraper:
         """获取列表页的一页数据，返回 [{itemUrl, title, id, status}]"""
         city_gbk = urllib.parse.quote(LIST_CITY.encode("gbk"))
         url = LIST_URL.format(city_gbk=city_gbk)
-        params = {"auction_source": "0", "st_param": "-1", "page": str(page)}
+        params = {
+            "auction_source": "0",
+            "st_param": "-1",
+            "category": CATEGORY_RESIDENTIAL,  # 只要住宅用房
+            "page": str(page),
+        }
         if date_start: params["auctionStartFrom"] = date_start
         if date_end: params["auctionStartTo"] = date_end
         full_url = url + "?" + urllib.parse.urlencode(params)
@@ -480,48 +489,60 @@ class DetailPageScraper:
     def _extract_status(self, page_text):
         """
         提取拍卖状态，判断是否成交。
+        严格逻辑：先查失败关键词（命中即失败），再查成功关键词。
         返回 {"text": str, "success": bool}
         """
         status_text = ""
 
-        # 方法1: 从页面文本中查找状态关键词
-        # "本场已结束" / "竞价成功" / "已成交" 等
-        for kw in SUCCESS_KEYWORDS:
-            if kw in page_text:
-                status_text = kw
-                break
+        # 从页面前2000字中查找状态（状态通常在页面顶部）
+        search_text = page_text[:2000]
 
-        if not status_text:
-            for kw in FAIL_KEYWORDS:
-                if kw in page_text:
-                    status_text = kw
-                    break
-
-        # 方法2: 从特定元素提取
-        if not status_text:
-            status_selectors = [
-                "[class*='status']", "[class*='auction-status']",
-                "[class*='state']", ".pm-status",
-            ]
-            for sel in status_selectors:
-                try:
-                    el = self.driver.find_element(By.CSS_SELECTOR, sel)
-                    text = el.text.strip()
-                    if text:
-                        status_text = text
+        # 先查失败关键词（优先级更高）
+        # "本场已流拍，无人出价！" → 包含"流拍"+"无人出价" → 失败
+        for kw in FAIL_KEYWORDS:
+            if kw in search_text:
+                # 找到包含该关键词的完整句子
+                for line in search_text.split('\n'):
+                    if kw in line:
+                        status_text = line.strip()
                         break
-                except NoSuchElementException:
-                    continue
+                return {"text": status_text, "success": False}
 
-        # 判断是否成功
-        is_success = False
-        if status_text:
-            is_success = any(kw in status_text for kw in SUCCESS_KEYWORDS)
-            # 如果有"已结束"但没有失败关键词，默认认为成功
-            if "已结束" in status_text and not any(kw in status_text for kw in FAIL_KEYWORDS):
-                is_success = True
+        # 再查成功关键词
+        for kw in SUCCESS_KEYWORDS:
+            if kw in search_text:
+                for line in search_text.split('\n'):
+                    if kw in line:
+                        status_text = line.strip()
+                        break
+                return {"text": status_text, "success": True}
 
-        return {"text": status_text, "success": is_success}
+        # 没找到任何状态关键词 → 从特定元素提取
+        status_selectors = [
+            "[class*='status']", "[class*='auction-status']",
+            "[class*='state']", ".pm-status",
+        ]
+        for sel in status_selectors:
+            try:
+                el = self.driver.find_element(By.CSS_SELECTOR, sel)
+                text = el.text.strip()
+                if text:
+                    status_text = text
+                    # 再次检查
+                    if any(kw in text for kw in FAIL_KEYWORDS):
+                        return {"text": text, "success": False}
+                    if any(kw in text for kw in SUCCESS_KEYWORDS):
+                        return {"text": text, "success": True}
+                    break
+            except NoSuchElementException:
+                continue
+
+        # 无法判断状态 → 默认跳过（保守策略：不确定就不下载）
+        if not status_text:
+            logger.warning("  ⚠ 未找到拍卖状态，默认跳过")
+            return {"text": "未知", "success": False}
+
+        return {"text": status_text, "success": False}
 
     def _extract_intro_table(self):
         """
@@ -1064,7 +1085,19 @@ class SfTaobaoScraper:
             consecutive_failures = 0
             cp_visited.add(url)
 
-            # 筛选：只保存成功拍卖的
+            # 筛选1：排除非住宅（车位、商铺、写字楼、土地、厂房等）
+            title = detail.get("title", "")
+            NON_RESIDENTIAL = ["车位", "车库", "商铺", "门面", "门市", "写字楼",
+                               "办公楼", "商业", "土地", "厂房", "仓库", "在建工程",
+                               "机器设备", "车辆", "股权", "债权"]
+            is_non_residential = any(kw in title for kw in NON_RESIDENTIAL)
+            if is_non_residential:
+                logger.info(f"  ⏭ 跳过（非住宅）: {title[:40]}")
+                self.stats["total_skipped"] += 1
+                self.checkpoint_detail.save(cp_visited, 0, self.stats["total_saved"])
+                continue
+
+            # 筛选2：只保存成功拍卖的
             if not detail.get("is_success"):
                 logger.info(f"  ⏭ 跳过（未成交）: {detail.get('status', '未知状态')}")
                 self.stats["total_skipped"] += 1
@@ -1162,7 +1195,7 @@ class SfTaobaoScraper:
 def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 法拍房数据爬取工具 (第六版)             ║
+║       阿里司法拍卖 - 法拍房数据爬取工具 (第七版)             ║
 ║                                                              ║
 ║  ✨ 全新策略：逐页提取 | 标的物介绍整表 | 附件下载            ║
 ║  ✨ 自动处理 Cookie 过期 | 断点续爬                           ║
