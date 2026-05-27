@@ -457,21 +457,16 @@ class DetailPageScraper:
         return {"text": status_text, "success": False}
 
     def _extract_intro_table(self):
-        """
-        优先通过 #J_desc > table 提取完整表格，支持多列与合并单元格。
-        若未找到则回退到通用表格查找或文本解析。
-        """
         table_rows = []
         raw_text = ""
 
-        # 第一步：优先使用指定选择器
+        # 优先使用 #J_desc > table
         try:
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#J_desc > table"))
             )
             table_elem = self.driver.find_element(By.CSS_SELECTOR, "#J_desc > table")
             table_rows = self._parse_table_to_grid(table_elem)
-            # 获取 raw text
             try:
                 desc_elem = self.driver.find_element(By.ID, "J_desc")
                 raw_text = desc_elem.text
@@ -482,7 +477,7 @@ class DetailPageScraper:
         except TimeoutException:
             logger.debug("未找到 #J_desc > table，尝试备选方案")
 
-        # 第二步：备选方案：遍历页面所有表格或文本解析
+        # 备选：遍历所有表格
         try:
             tables = self.driver.find_elements(By.TAG_NAME, "table")
             for table in tables:
@@ -493,14 +488,11 @@ class DetailPageScraper:
                 if grid and len(grid) > 1:
                     table_rows = grid
                     break
-            # 如果仍未找到，尝试文本解析
             if not table_rows:
                 logger.debug("HTML表格未找到有效数据，启用文本解析")
                 table_rows = self._fallback_text_parse_to_rows()
-            # 补充 raw text
             if not raw_text:
                 raw_text = self.driver.find_element(By.TAG_NAME, "body").text
-                # 尝试截取标的物介绍部分
                 intro_start = -1
                 for marker in ["标的物介绍", "拍卖标的基本情况", "标的物详情"]:
                     idx = raw_text.find(marker)
@@ -522,10 +514,6 @@ class DetailPageScraper:
         return {"table_rows": table_rows, "raw": raw_text}
 
     def _parse_table_to_grid(self, table_element):
-        """
-        将 Selenium table 元素解析为二维网格，处理 colspan/rowspan。
-        返回 list of lists，第一行为表头（如果存在 th）。
-        """
         rows_el = table_element.find_elements(By.TAG_NAME, "tr")
         if not rows_el:
             return []
@@ -573,7 +561,6 @@ class DetailPageScraper:
         return cleaned
 
     def _fallback_text_parse_to_rows(self):
-        """备选文本解析，转换为两列格式"""
         table_data = {}
         try:
             body = self.driver.find_element(By.TAG_NAME, "body")
@@ -686,7 +673,7 @@ def download_attachment(url, save_path, driver=None):
 
 
 # ============================================================
-# 主爬虫
+# 主爬虫（新增去重方法）
 # ============================================================
 
 class SfTaobaoScraper:
@@ -793,6 +780,24 @@ class SfTaobaoScraper:
             logger.error(f"Cookie 注入失败: {e}")
             return False
 
+    def _deduplicate_urls_by_id(self, urls):
+        """
+        基于拍品ID去重，保留第一个出现的URL
+        """
+        seen_ids = set()
+        deduped = []
+        for url in urls:
+            # 提取 URL 中的拍品ID (10位以上数字，在.htm之前)
+            m = re.search(r"(\d{10,})\.htm", url)
+            item_id = m.group(1) if m else url  # 如果没有ID，用整个URL作为键
+            if item_id not in seen_ids:
+                seen_ids.add(item_id)
+                deduped.append(url)
+        removed = len(urls) - len(deduped)
+        if removed > 0:
+            logger.info(f"去重移除 {removed} 个重复URL")
+        return deduped
+
     def _save_item(self, detail, date_range_str):
         title = detail.get("title", "未知")
         safe_title = sanitize_filename(title)
@@ -818,7 +823,7 @@ class SfTaobaoScraper:
         with open(os.path.join(item_dir, "拍卖信息.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(info_lines))
 
-        # 3. 标的物介绍 CSV（多列）
+        # 3. 标的物介绍 CSV
         intro = detail.get("intro_table", {})
         table_rows = intro.get("table_rows", [])
         if table_rows:
@@ -911,7 +916,11 @@ class SfTaobaoScraper:
                 break
             random_delay()
 
-        logger.info(f"\n共收集到 {len(all_urls)} 个拍品 URL")
+        logger.info(f"\n共收集到 {len(all_urls)} 个拍品 URL（去重前）")
+        # *** 关键去重：基于拍品ID ***
+        all_urls = self._deduplicate_urls_by_id(all_urls)
+        logger.info(f"去重后剩余 {len(all_urls)} 个 URL")
+
         self._process_details(all_urls, date_range_str)
 
     def _run_detail_only(self, date_range_str):
@@ -924,6 +933,8 @@ class SfTaobaoScraper:
             all_urls = [l.strip() for l in f if l.strip() and l.strip().startswith("http")]
 
         logger.info(f"从 urls.txt 读取到 {len(all_urls)} 个 URL")
+        # 对读取的 URL 也进行去重
+        all_urls = self._deduplicate_urls_by_id(all_urls)
         self._process_details(all_urls, date_range_str)
 
     def _process_details(self, all_urls, date_range_str):
@@ -946,7 +957,7 @@ class SfTaobaoScraper:
 
         consecutive_failures = 0
 
-        # 修改后的非住宅关键词（不含车位、车库）
+        # 非住宅关键词（不含车位、车库）
         NON_RESIDENTIAL = ["商铺", "门面", "门市", "写字楼",
                            "办公楼", "商业", "土地", "厂房", "仓库", "在建工程",
                            "机器设备", "车辆", "股权", "债权"]
@@ -1005,7 +1016,7 @@ class SfTaobaoScraper:
             consecutive_failures = 0
             cp_visited.add(url)
 
-            # 非住宅过滤（去掉了车位/车库）
+            # 非住宅过滤
             title = detail.get("title", "")
             is_non_residential = any(kw in title for kw in NON_RESIDENTIAL)
             if is_non_residential:
@@ -1107,7 +1118,7 @@ def main():
 
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║           阿里司法拍卖 - 法拍房数据爬取工具 (V0.10)          ║
+║           阿里司法拍卖 - 法拍房数据爬取工具 (V0.11)          ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 
@@ -1118,8 +1129,7 @@ _| |__/ | \_ ___ ___] |  | | | \| |  | | \| |__|
                         
 ————————
 版本更新日志:
-    状态判定仅用明确关键词                                    
-    标的物介绍优先抓取 #J_desc > table（支持多列/合并）
+    去除重复URL
 ————————
 准备工作：
     1.用浏览器打开 https://sf.taobao.com/ 并登录
