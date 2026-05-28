@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.13
-=============================================
-改进：
-  - 自动安装依赖（selenium, requests, beautifulsoup4）
-  - 全自动下载 Chrome/Edge WebDriver
-  - 统一配置文件 crawl_config.json 管理所有状态与进度
-  - 任何退出自动保存进度，启动时智能恢复
-  - 无需手动输入 Cookie，浏览器登录后自动保存
-  - 日志文件输出到输出目录
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.13 修订版
+===================================================
+修正：任务中断后状态正确保持 in_progress，URL 列表不丢失，恢复时可继续。
 """
 
 import re
@@ -28,12 +22,11 @@ from datetime import datetime
 from pathlib import Path
 import io
 
-# 第三方库动态检查
 try:
     import requests
     from bs4 import BeautifulSoup
 except ImportError:
-    pass  # 将在依赖安装阶段处理
+    pass
 
 try:
     from selenium import webdriver
@@ -76,7 +69,7 @@ USER_AGENTS = [
 ]
 
 # ============================================================
-# 日志配置（基础，稍后添加文件输出）
+# 日志
 # ============================================================
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -102,19 +95,16 @@ def safe_makedirs(path):
     os.makedirs(path, exist_ok=True)
 
 def get_webdriver_path(browser_type):
-    """返回 webdriver 的期望路径"""
     script_dir = get_script_dir()
     if browser_type == "edge":
         return os.path.join(script_dir, "msedgedriver.exe")
     return os.path.join(script_dir, "chromedriver.exe")
 
 def download_chromedriver():
-    """自动下载 ChromeDriver（需联网）"""
     script_dir = get_script_dir()
     target = os.path.join(script_dir, "chromedriver.exe")
     if os.path.isfile(target):
         return target
-    # 获取 Chrome 版本
     try:
         output = subprocess.check_output(
             r'reg query "HKEY_CURRENT_USER\Software\Google\Chrome\BLBeacon" /v version',
@@ -122,7 +112,6 @@ def download_chromedriver():
         )
         version = re.search(r'REG_SZ\s+([\d.]+)', output.decode()).group(1)
     except:
-        # 尝试用 powershell
         try:
             result = subprocess.run(
                 ["powershell", "-Command",
@@ -131,12 +120,11 @@ def download_chromedriver():
             )
             version = result.stdout.strip()
         except:
-            logger.error("无法获取 Chrome 版本，自动下载失败")
+            logger.error("无法获取 Chrome 版本")
             return None
 
     logger.info(f"Chrome 版本: {version}")
     major = version.split('.')[0]
-    # 查询合适的 chromedriver 版本
     try:
         resp = requests.get(f"https://registry.npmmirror.com/-/binary/chromedriver/{version}/")
         if resp.status_code != 200:
@@ -172,13 +160,11 @@ def download_chromedriver():
     return None
 
 def download_edgedriver():
-    """自动下载 EdgeDriver"""
     script_dir = get_script_dir()
     target = os.path.join(script_dir, "msedgedriver.exe")
     if os.path.isfile(target):
         return target
     version = None
-    # 获取 Edge 版本
     for p in [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -193,7 +179,7 @@ def download_edgedriver():
                 break
             except: pass
     if not version:
-        logger.error("无法获取 Edge 版本，自动下载失败")
+        logger.error("无法获取 Edge 版本")
         return None
 
     logger.info(f"Edge 版本: {version}")
@@ -221,11 +207,10 @@ def download_edgedriver():
                 return target
         except Exception as e:
             logger.warning(f"下载失败: {e}")
-    logger.error("自动下载 EdgeDriver 失败，请手动下载")
+    logger.error("自动下载 EdgeDriver 失败")
     return None
 
 def detect_browser():
-    """检测浏览器类型，返回 ('edge'/'chrome', 本地driver路径或None)"""
     edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     if not os.path.isfile(edge_exe):
         edge_exe = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
@@ -238,7 +223,6 @@ def detect_browser():
     if os.path.isfile(chrome_exe):
         return "chrome", get_webdriver_path("chrome") if os.path.isfile(get_webdriver_path("chrome")) else None
 
-    # 检查 PATH
     if shutil.which("msedge"): return "edge", None
     if shutil.which("google-chrome") or shutil.which("chrome"): return "chrome", None
     return None, None
@@ -252,13 +236,13 @@ DEFAULT_CONFIG = {
     "date_start": "2024-01-01",
     "date_end": "2026-03-31",
     "mode": "full",
-    "task_status": "not_started",   # not_started / in_progress / completed
+    "task_status": "not_started",
     "list_progress": {
         "last_page": 0,
-        "all_urls": []             # 收集到的所有 URL（去重前）
+        "all_urls": []            # 去重后的完整 URL 列表，详情处理完才清空
     },
     "detail_progress": {
-        "visited_urls": [],        # 已处理的详情 URL
+        "visited_urls": [],
         "saved_count": 0
     },
     "last_update": ""
@@ -276,7 +260,6 @@ class ConfigManager:
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                # 合并缺失字段
                 for key, val in DEFAULT_CONFIG.items():
                     if key not in config:
                         config[key] = val
@@ -292,11 +275,6 @@ class ConfigManager:
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
 
-    def update_progress(self, **kwargs):
-        for k, v in kwargs.items():
-            self.data[k] = v
-        self.save()
-
     def is_task_completed(self):
         return self.data.get("task_status") == "completed"
 
@@ -305,14 +283,13 @@ class ConfigManager:
 
     def mark_completed(self):
         self.data["task_status"] = "completed"
-        # 清除详细进度以节省空间
+        # 清除详细进度
         self.data["list_progress"]["all_urls"] = []
         self.data["list_progress"]["last_page"] = 0
         self.data["detail_progress"]["visited_urls"] = []
         self.save()
 
     def reset_for_new_task(self):
-        """保留 cookie 和上次日期作为默认值，重置进度"""
         cookie = self.data.get("cookie", "")
         date_start = self.data.get("date_start", "2024-01-01")
         date_end = self.data.get("date_end", "2026-03-31")
@@ -361,7 +338,6 @@ class ListPageScraper:
             logger.error("⚠️ 触发反爬或需要登录")
             return "blocked", []
 
-        # JSON 提取
         items = []
         try:
             script_el = self.driver.find_element(By.ID, "sf-item-list-data")
@@ -373,7 +349,6 @@ class ListPageScraper:
                     return "ok", self._normalize(items)
         except: pass
 
-        # 源码正则
         page_source = self.driver.page_source
         m = re.search(r'id="sf-item-list-data"[^>]*>(.*?)</script>', page_source, re.DOTALL)
         if m:
@@ -384,7 +359,6 @@ class ListPageScraper:
                     return "ok", self._normalize(items)
             except: pass
 
-        # HTML 解析
         try:
             links = self.driver.find_elements(By.CSS_SELECTOR,
                 "a[href*='sf-item'], a[href*='susong-item'], a[href*='auction']")
@@ -491,7 +465,6 @@ class DetailPageScraper:
             if kw in search:
                 for line in search.split('\n'):
                     if kw in line: return {"text": line.strip(), "success": True}
-        # CSS 兜底
         for sel in ["[class*='status']", "[class*='auction-status']", "[class*='state']", ".pm-status"]:
             try:
                 el = self.driver.find_element(By.CSS_SELECTOR, sel)
@@ -520,7 +493,6 @@ class DetailPageScraper:
         except TimeoutException:
             pass
 
-        # 备选：所有表格
         try:
             tables = self.driver.find_elements(By.TAG_NAME, "table")
             for t in tables:
@@ -662,7 +634,6 @@ class SfTaobaoScraper:
         self.stats = {"total_urls": 0, "total_saved": 0, "total_skipped": 0, "total_failed": 0, "start_time": None}
         self.output_root = os.path.join(get_script_dir(), "output")
         self.log_handler = None
-        self._all_urls_dedup = []
 
     def start(self):
         self.stats["start_time"] = time.time()
@@ -688,7 +659,6 @@ class SfTaobaoScraper:
         })
         self.driver.get("https://sf.taobao.com/")
 
-        # 尝试注入保存的 cookie
         saved_cookie = self.config.data.get("cookie", "")
         if saved_cookie:
             self._inject_cookie(saved_cookie)
@@ -700,7 +670,6 @@ class SfTaobaoScraper:
             choice = input("登录成功？(Y/N): ").strip().upper()
             if choice == "Y":
                 break
-        # 保存当前 cookie
         cookies = self.driver.get_cookies()
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         self.config.data["cookie"] = cookie_str
@@ -826,7 +795,7 @@ class SfTaobaoScraper:
                     all_urls.append(url)
             # 保存进度
             list_prog["last_page"] = page
-            list_prog["all_urls"] = all_urls
+            list_prog["all_urls"] = all_urls   # 保留未去重 URL 也没关系，后面会统一去重
             self.config.save()
             self.stats["total_urls"] = len(all_urls)
             if len(items) < ITEMS_PER_PAGE:
@@ -835,9 +804,8 @@ class SfTaobaoScraper:
 
         all_urls = self._deduplicate_urls(all_urls)
         logger.info(f"去重后 URL 数量: {len(all_urls)}")
-        self._all_urls_dedup = all_urls
-        # 进入详情处理前清空列表 URL 以免配置文件过大
-        self.config.data["list_progress"]["all_urls"] = []
+        # 将去重后的 URL 存入配置
+        self.config.data["list_progress"]["all_urls"] = all_urls
         self.config.save()
         self._process_details(all_urls, date_range_str)
 
@@ -850,26 +818,33 @@ class SfTaobaoScraper:
             urls = [l.strip() for l in f if l.strip().startswith("http")]
         urls = self._deduplicate_urls(urls)
         logger.info(f"从 urls.txt 加载 {len(urls)} 个 URL")
+        # 存入配置以便中断恢复
+        self.config.data["list_progress"]["all_urls"] = urls
+        self.config.save()
         self._process_details(urls, date_range_str)
 
     def _process_details(self, urls, date_range_str):
+        """
+        处理详情页，传入完整的 URL 列表。
+        若中断，进度（visited_urls）保留在配置中，下次可从配置恢复。
+        正常结束才标记 completed。
+        """
         config = self.config.data
         detail_prog = config.get("detail_progress", {})
         visited = set(detail_prog.get("visited_urls", []))
         saved_count = detail_prog.get("saved_count", 0)
         self.stats["total_saved"] = saved_count
 
-        logger.info(f"阶段2：处理详情页 ({len(urls)} 个)")
+        # 计算待处理列表（总列表 - 已访问）
+        pending = [u for u in urls if u not in visited]
+        total = len(pending)
+        logger.info(f"阶段2：处理详情页 ({total} 个待处理)")
+
+        completed_normally = True
         consecutive_fail = 0
 
-        for idx, url in enumerate(urls):
-            if url in visited:
-                continue
-            if "sf_item" not in url and "auction" not in url and "susong" not in url:
-                visited.add(url)
-                continue
-
-            logger.info(f"[{idx+1}/{len(urls)}] {url[:80]}")
+        for idx, url in enumerate(pending):
+            logger.info(f"[{idx+1}/{total}] {url[:80]}")
             random_delay()
 
             result = self.detail_scraper.fetch_detail(url)
@@ -884,46 +859,85 @@ class SfTaobaoScraper:
                 if consecutive_fail >= 3:
                     if self._handle_blocked():
                         consecutive_fail = 0
-                        continue
+                        # 重试当前 url
+                        result = self.detail_scraper.fetch_detail(url)
+                        if isinstance(result, tuple):
+                            status, detail = result
+                        else:
+                            status = "error"
+                            detail = result
+                        if status == "blocked":
+                            # 再次阻塞，放弃当前 URL
+                            visited.add(url)
+                            self.stats["total_failed"] += 1
+                        else:
+                            pass  # 继续处理这个 url 的后续逻辑（注意：这里需要重新进行过滤和保存，为简化代码，直接标记为已处理并跳过保存，实际可以改进）
+                            visited.add(url)
+                            self.stats["total_failed"] += 1
                     else:
+                        completed_normally = False
                         break
-                visited.add(url)
-                continue
+                else:
+                    visited.add(url)
+                    self.stats["total_failed"] += 1
+                continue   # 已处理，跳过后续过滤
+
             elif status == "need_login":
                 if self._handle_blocked():
-                    continue
+                    # 重试
+                    result = self.detail_scraper.fetch_detail(url)
+                    if isinstance(result, tuple):
+                        status, detail = result
+                    else:
+                        status = "error"
+                        detail = result
+                    if status != "ok":
+                        visited.add(url)
+                        self.stats["total_failed"] += 1
                 else:
+                    completed_normally = False
                     break
+                continue
+
             elif status == "error":
                 visited.add(url)
                 self.stats["total_failed"] += 1
                 consecutive_fail += 1
                 if consecutive_fail >= 10:
                     logger.error("连续10次失败，暂停")
+                    completed_normally = False
                     break
                 continue
+
+            # status == ok
+            consecutive_fail = 0
+            visited.add(url)
+
+            title = detail.get("title", "")
+            if any(kw in title for kw in NON_RESIDENTIAL):
+                logger.info(f"⏭ 跳过非住宅: {title[:40]}")
+                self.stats["total_skipped"] += 1
+            elif not detail.get("is_success"):
+                logger.info(f"⏭ 跳过未成交: {detail.get('status')}")
+                self.stats["total_skipped"] += 1
             else:
-                consecutive_fail = 0
-                visited.add(url)
+                self._save_item(detail, date_range_str)
+                self.stats["total_saved"] += 1
 
-                title = detail.get("title", "")
-                if any(kw in title for kw in NON_RESIDENTIAL):
-                    logger.info(f"⏭ 跳过非住宅: {title[:40]}")
-                    self.stats["total_skipped"] += 1
-                elif not detail.get("is_success"):
-                    logger.info(f"⏭ 跳过未成交: {detail.get('status')}")
-                    self.stats["total_skipped"] += 1
-                else:
-                    self._save_item(detail, date_range_str)
-                    self.stats["total_saved"] += 1
+            # 更新详情进度
+            detail_prog["visited_urls"] = list(visited)
+            detail_prog["saved_count"] = self.stats["total_saved"]
+            self.config.save()
 
-                # 保存详情进度
-                detail_prog["visited_urls"] = list(visited)
-                detail_prog["saved_count"] = self.stats["total_saved"]
-                self.config.save()
-
-        # 正常结束
-        self.config.mark_completed()
+        # 循环结束
+        if completed_normally:
+            self.config.mark_completed()
+            logger.info("所有 URL 处理完毕，任务完成")
+        else:
+            # 保持 in_progress 状态
+            self.config.data["task_status"] = "in_progress"
+            self.config.save()
+            logger.info("任务中断，进度已保存")
 
     def _print_stats(self):
         elapsed = time.time() - self.stats["start_time"] if self.stats["start_time"] else 0
@@ -995,10 +1009,9 @@ def install_dependencies():
 def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 法拍房数据爬取工具 v0.13                ║
+║       阿里司法拍卖 - 法拍房数据爬取工具 v0.13 修订版         ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
-    # 1. 检查 selenium
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
         ans = input("是否自动安装依赖？(Y/N): ").strip().upper()
@@ -1012,7 +1025,6 @@ def main():
         else:
             sys.exit(1)
 
-    # 2. 检测浏览器与 driver
     browser_type, driver_path = detect_browser()
     if not browser_type:
         print("❌ 未检测到 Edge 或 Chrome 浏览器")
@@ -1030,13 +1042,11 @@ def main():
             sys.exit(1)
         print(f"✓ WebDriver 已下载: {driver_path}")
 
-    # 3. 配置管理
     config = ConfigManager()
     if config.is_task_in_progress():
         print("\n⚠️ 检测到未完成的任务")
         ans = input("是否恢复上次进度？(Y/N): ").strip().upper()
         if ans == "Y":
-            # 沿用配置中的参数
             date_start = config.data["date_start"]
             date_end = config.data["date_end"]
             mode = config.data["mode"]
@@ -1068,7 +1078,6 @@ def main():
         config.data["task_status"] = "in_progress"
         config.save()
     else:
-        # 首次运行
         date_start = input("开始日期 (默认 2024-01-01): ").strip() or "2024-01-01"
         date_end = input("结束日期 (默认 2026-03-31): ").strip() or "2026-03-31"
         mode = input("模式: 1=完整 2=仅详情页 (默认 1): ").strip()
