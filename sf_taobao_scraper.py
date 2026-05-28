@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 (第十版)
 ========================================
+改进：
+  - 无需输入 Cookie，浏览器启动后手动登录并确认
+  - 遇到验证码时暂停，等待手动操作后确认继续
+  - 启动时检测断点，明确询问是否恢复
+  - 日志文件输出到输出目录（与汇总文件同级）
+  - 保留拍品 ID 去重、精确状态判定、完整表格提取等特性
 """
 
 import re
@@ -61,6 +67,7 @@ MAX_PAGES = 150
 MIN_DELAY = 2.0
 MAX_DELAY = 5.0
 
+# 日志基础配置（后续会添加 FileHandler）
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -74,7 +81,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
 ]
 
-# 拍卖成功/失败关键词
 SUCCESS_KEYWORDS = ["本场已结束"]
 FAIL_KEYWORDS = ["本场已流拍，无人出价"]
 
@@ -252,7 +258,7 @@ class ListPageScraper:
 
         cur_url = self.driver.current_url
         if "deny" in cur_url or "punish" in cur_url or "login" in cur_url:
-            logger.error("⚠️ 触发反爬验证或 Cookie 失效！")
+            logger.error("⚠️ 触发反爬验证或需要登录")
             return "blocked", []
 
         # 方法1: JSON
@@ -360,7 +366,7 @@ class DetailPageScraper:
             logger.error("  ⚠️ 触发反爬验证")
             return "blocked", result
         if "login" in cur_url:
-            logger.error("  ⚠️ Cookie 失效，需要重新登录")
+            logger.error("  ⚠️ 需要登录")
             return "need_login", result
 
         page_text = self.driver.find_element(By.TAG_NAME, "body").text
@@ -460,7 +466,7 @@ class DetailPageScraper:
         table_rows = []
         raw_text = ""
 
-        # 优先使用 #J_desc > table
+        # 优先 #J_desc > table
         try:
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#J_desc > table"))
@@ -477,7 +483,6 @@ class DetailPageScraper:
         except TimeoutException:
             logger.debug("未找到 #J_desc > table，尝试备选方案")
 
-        # 备选：遍历所有表格
         try:
             tables = self.driver.find_elements(By.TAG_NAME, "table")
             for table in tables:
@@ -489,7 +494,7 @@ class DetailPageScraper:
                     table_rows = grid
                     break
             if not table_rows:
-                logger.debug("HTML表格未找到有效数据，启用文本解析")
+                logger.debug("HTML表格未找到，启用文本解析")
                 table_rows = self._fallback_text_parse_to_rows()
             if not raw_text:
                 raw_text = self.driver.find_element(By.TAG_NAME, "body").text
@@ -673,12 +678,11 @@ def download_attachment(url, save_path, driver=None):
 
 
 # ============================================================
-# 主爬虫（新增去重方法）
+# 主爬虫
 # ============================================================
 
 class SfTaobaoScraper:
-    def __init__(self, cookie, browser_type="edge", driver_path=None):
-        self.cookie = cookie
+    def __init__(self, browser_type="edge", driver_path=None):
         self.browser_type = browser_type
         self.driver_path = driver_path
         self.driver = None
@@ -694,8 +698,10 @@ class SfTaobaoScraper:
             "start_time": None,
         }
         self.output_root = os.path.join(get_script_dir(), "output")
+        self.log_handler = None   # 日志文件 handler，稍后添加
 
     def start(self):
+        """启动浏览器并等待用户手动登录"""
         self.stats["start_time"] = time.time()
 
         if self.browser_type == "edge":
@@ -721,75 +727,64 @@ class SfTaobaoScraper:
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         })
 
-        self._inject_cookie(self.cookie)
+        # 显示首页，等待用户手动登录
+        self.driver.get("https://sf.taobao.com/")
+        print("\n" + "=" * 60)
+        print("请在打开的浏览器窗口中手动登录淘宝账号")
+        print("登录完成后，回到此窗口输入 Y 继续")
+        while True:
+            choice = input("登录成功？(Y/N): ").strip().upper()
+            if choice == "Y":
+                logger.info("用户确认登录成功，继续执行")
+                break
+            else:
+                print("请确保已登录后再输入 Y")
 
         self.list_scraper = ListPageScraper(self.driver)
         self.detail_scraper = DetailPageScraper(self.driver)
-        logger.info(f"浏览器已启动 ({self.browser_type.upper()})")
+
+    def _setup_log_file(self, date_range_str):
+        """将日志输出到日期文件夹下"""
+        log_dir = os.path.join(self.output_root, date_range_str)
+        safe_makedirs(log_dir)
+        log_path = os.path.join(log_dir, f"crawl_{date_range_str}.log")
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        self.log_handler = fh
+        logger.info(f"日志文件: {log_path}")
 
     def stop(self):
+        if self.log_handler:
+            logger.removeHandler(self.log_handler)
+            self.log_handler.close()
         if self.driver:
             try: self.driver.quit()
             except: pass
 
-    def _inject_cookie(self, cookie_str):
-        self.driver.get("https://sf.taobao.com/")
-        time.sleep(2)
-        for item in cookie_str.split(";"):
-            item = item.strip()
-            if "=" in item:
-                n, v = item.split("=", 1)
-                try:
-                    self.driver.add_cookie({
-                        "name": n.strip(), "value": v.strip(),
-                        "domain": ".taobao.com", "path": "/"
-                    })
-                except: pass
-        self.driver.refresh()
-        time.sleep(2)
-
     def _handle_blocked(self, reason="blocked"):
+        """
+        遇到验证码时，暂停等待用户手动处理并确认
+        """
         print("\n" + "=" * 60)
-        if reason == "blocked":
-            print("⚠️  检测到反爬验证（验证码/滑块）！")
-            print("正在打开系统浏览器，请手动完成验证...")
-            webbrowser.open("https://sf.taobao.com/")
-            print("\n完成验证后，请：")
-            print("  1. 在系统浏览器中登录淘宝")
-            print("  2. 按 F12 → Network → 刷新页面")
-            print("  3. 复制任意请求的 Cookie 值")
-        else:
-            print("⚠️  Cookie 已失效，需要重新输入！")
-            print("请：")
-            print("  1. 用浏览器打开 https://sf.taobao.com/ 并登录")
-            print("  2. 按 F12 → Network → 刷新页面")
-            print("  3. 复制任意请求的 Cookie 值")
-
-        print("\n" + "-" * 60)
-        new_cookie = input("请粘贴新 Cookie（直接回车放弃）: ").strip()
-        if not new_cookie:
-            print("放弃，继续处理已采集的数据...")
-            return False
-
-        self.cookie = new_cookie
-        try:
-            self._inject_cookie(new_cookie)
-            logger.info("✓ Cookie 已更新，继续爬取")
+        print("⚠️  检测到反爬验证（验证码/滑块）！")
+        print("请在浏览器中手动完成验证，然后回到此窗口确认继续")
+        choice = input("是否已完成验证并继续？(Y/N): ").strip().upper()
+        if choice == "Y":
+            logger.info("用户确认验证完成，继续爬取")
             return True
-        except Exception as e:
-            logger.error(f"Cookie 注入失败: {e}")
+        else:
+            print("放弃继续，程序将保存当前进度后退出")
             return False
 
     def _deduplicate_urls_by_id(self, urls):
-        """
-        基于拍品ID去重，保留第一个出现的URL
-        """
         seen_ids = set()
         deduped = []
         for url in urls:
-            # 提取 URL 中的拍品ID (10位以上数字，在.htm之前)
             m = re.search(r"(\d{10,})\.htm", url)
-            item_id = m.group(1) if m else url  # 如果没有ID，用整个URL作为键
+            item_id = m.group(1) if m else url
             if item_id not in seen_ids:
                 seen_ids.add(item_id)
                 deduped.append(url)
@@ -857,10 +852,13 @@ class SfTaobaoScraper:
 
     def run(self, date_start="2024-01-01", date_end="2026-03-31", mode="full"):
         date_range_str = f"{date_start}_to_{date_end}"
+        self._setup_log_file(date_range_str)
+
         if mode == "full":
             self._run_full(date_start, date_end, date_range_str)
         elif mode == "detail_only":
             self._run_detail_only(date_range_str)
+
         self._print_stats()
 
     def _run_full(self, date_start, date_end, date_range_str):
@@ -889,6 +887,7 @@ class SfTaobaoScraper:
 
             if status == "blocked":
                 if self._handle_blocked("blocked"):
+                    # 重试当前页
                     status, items = self.list_scraper.fetch_page(page, date_start, date_end)
                     if status != "ok":
                         logger.error("重试失败，停止")
@@ -917,7 +916,6 @@ class SfTaobaoScraper:
             random_delay()
 
         logger.info(f"\n共收集到 {len(all_urls)} 个拍品 URL（去重前）")
-        # *** 关键去重：基于拍品ID ***
         all_urls = self._deduplicate_urls_by_id(all_urls)
         logger.info(f"去重后剩余 {len(all_urls)} 个 URL")
 
@@ -933,7 +931,6 @@ class SfTaobaoScraper:
             all_urls = [l.strip() for l in f if l.strip() and l.strip().startswith("http")]
 
         logger.info(f"从 urls.txt 读取到 {len(all_urls)} 个 URL")
-        # 对读取的 URL 也进行去重
         all_urls = self._deduplicate_urls_by_id(all_urls)
         self._process_details(all_urls, date_range_str)
 
@@ -957,7 +954,6 @@ class SfTaobaoScraper:
 
         consecutive_failures = 0
 
-        # 非住宅关键词（不含车位、车库）
         NON_RESIDENTIAL = ["商铺", "门面", "门市", "写字楼",
                            "办公楼", "商业", "土地", "厂房", "仓库", "在建工程",
                            "机器设备", "车辆", "股权", "债权"]
@@ -995,7 +991,9 @@ class SfTaobaoScraper:
                 cp_visited.add(url)
                 continue
             elif status == "need_login":
+                logger.error("需要重新登录")
                 if self._handle_blocked("need_login"):
+                    # 重新尝试
                     detail_result = self.detail_scraper.fetch_detail(url)
                     if isinstance(detail_result, tuple):
                         status, detail = detail_result
@@ -1115,26 +1113,18 @@ class SfTaobaoScraper:
 
 def main():
     print("""
-
 ╔══════════════════════════════════════════════════════════════╗
+║       阿里司法拍卖 - 法拍房数据爬取工具 (第十版)             ║
 ║                                                              ║
-║           阿里司法拍卖 - 法拍房数据爬取工具 (V0.11)          ║
-║                                                              ║
+║  ✨ 手动登录，无需输入 Cookie                                 ║
+║  ✨ 遇到验证码暂停，手动处理后继续                             ║
+║  ✨ 断点续爬明确询问                                          ║
+║  ✨ 日志文件保存在输出目录                                    ║
 ╚══════════════════════════════════════════════════════════════╝
 
-————————
- _ ___  _  _     ____ _  _ _ _  _ ____ _  _ ____ 
- | |  \ |_/      [__  |__| | |\ | |__| |\ | |  | 
-_| |__/ | \_ ___ ___] |  | | | \| |  | | \| |__| 
-                        
-————————
-版本更新日志:
-    去除重复URL
-————————
-准备工作：
-    1.用浏览器打开 https://sf.taobao.com/ 并登录
-    2.F12 → Network → 刷新 → 复制 Cookie
-————————
+📌 运行说明：
+   程序将自动打开浏览器，请在浏览器中手动登录淘宝司法拍卖账号，
+   登录成功后回到本窗口输入 Y 继续。
 """)
 
     if not HAS_SELENIUM:
@@ -1150,10 +1140,6 @@ _| |__/ | \_ ___ ___] |  | | | \| |  | | \| |__|
             print(f"   Driver: 未找到，将自动下载")
     else:
         print("⚠️  未检测到 Edge/Chrome")
-
-    cookie = input("\n请粘贴 Cookie: ").strip()
-    if not cookie:
-        print("Cookie 不能为空"); sys.exit(1)
 
     print("\n📅 日期范围：")
     date_start = input("  开始日期 (默认 2024-01-01): ").strip() or "2024-01-01"
@@ -1175,11 +1161,17 @@ _| |__/ | \_ ___ ___] |  | | | \| |  | | \| |__|
             dp = input("  chromedriver 路径: ").strip()
             if dp: driver_path = dp
 
+    # 检测断点文件，提前告知用户
+    checkpoint_list_file = os.path.join(get_script_dir(), ".checkpoint_list.json")
+    checkpoint_detail_file = os.path.join(get_script_dir(), ".checkpoint_detail.json")
+    if os.path.exists(checkpoint_list_file) or os.path.exists(checkpoint_detail_file):
+        print("\n⚠️  检测到上次未完成的断点文件，启动后可选择是否恢复")
+
     print(f"\n{'='*60}\n开始爬取...\n{'='*60}\n")
-    scraper = SfTaobaoScraper(cookie, browser_type=browser_type or "edge", driver_path=driver_path)
+    scraper = SfTaobaoScraper(browser_type=browser_type or "edge", driver_path=driver_path)
 
     try:
-        scraper.start()
+        scraper.start()   # 这里会等待用户登录
         scraper.run(date_start, date_end, mode)
         date_range_str = f"{date_start}_to_{date_end}"
         scraper.save_summary(date_range_str)
