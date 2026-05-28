@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.13 修订版
-===================================================
-修正：任务中断后状态正确保持 in_progress，URL 列表不丢失，恢复时可继续。
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.14
+============================================
+- 修复列表中断误入详情问题
+- 修复详情失败URL被永久跳过问题
+- 强化中断恢复逻辑，状态完全持久化
 """
 
 import re
@@ -20,7 +22,6 @@ import subprocess
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-import io
 
 try:
     import requests
@@ -239,10 +240,10 @@ DEFAULT_CONFIG = {
     "task_status": "not_started",
     "list_progress": {
         "last_page": 0,
-        "all_urls": []            # 去重后的完整 URL 列表，详情处理完才清空
+        "all_urls": []        # 未去重原始URL（列表阶段），完成后替换为去重列表
     },
     "detail_progress": {
-        "visited_urls": [],
+        "visited_urls": [],   # 已成功处理或跳过的URL
         "saved_count": 0
     },
     "last_update": ""
@@ -268,9 +269,7 @@ class ConfigManager:
                 pass
         return dict(DEFAULT_CONFIG)
 
-    def save(self, data=None):
-        if data:
-            self.data = data
+    def save(self):
         self.data["last_update"] = datetime.now().isoformat()
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
@@ -776,36 +775,45 @@ class SfTaobaoScraper:
         start_page = last_page + 1 if last_page > 0 else 1
 
         logger.info("阶段1：收集拍品 URL")
+        user_aborted = False
         for page in range(start_page, MAX_PAGES + 1):
             status, items = self.list_scraper.fetch_page(page, date_start, date_end)
             if status == "blocked":
                 if self._handle_blocked():
                     status, items = self.list_scraper.fetch_page(page, date_start, date_end)
                 else:
+                    user_aborted = True
                     break
             if status == "timeout":
                 time.sleep(10)
                 continue
             if not items:
-                break
+                break   # 正常结束
 
             for it in items:
                 url = it.get("itemUrl")
                 if url:
                     all_urls.append(url)
-            # 保存进度
             list_prog["last_page"] = page
-            list_prog["all_urls"] = all_urls   # 保留未去重 URL 也没关系，后面会统一去重
+            list_prog["all_urls"] = all_urls
             self.config.save()
             self.stats["total_urls"] = len(all_urls)
             if len(items) < ITEMS_PER_PAGE:
                 break
             random_delay()
 
+        # 用户中断，直接返回，不进入详情
+        if user_aborted:
+            logger.info("列表爬取被用户中断，进度已保存")
+            self.config.data["task_status"] = "in_progress"
+            self.config.save()
+            return
+
+        # 正常结束列表阶段
         all_urls = self._deduplicate_urls(all_urls)
         logger.info(f"去重后 URL 数量: {len(all_urls)}")
-        # 将去重后的 URL 存入配置
         self.config.data["list_progress"]["all_urls"] = all_urls
+        self.config.data["list_progress"]["last_page"] = MAX_PAGES  # 标记完成
         self.config.save()
         self._process_details(all_urls, date_range_str)
 
@@ -818,30 +826,25 @@ class SfTaobaoScraper:
             urls = [l.strip() for l in f if l.strip().startswith("http")]
         urls = self._deduplicate_urls(urls)
         logger.info(f"从 urls.txt 加载 {len(urls)} 个 URL")
-        # 存入配置以便中断恢复
         self.config.data["list_progress"]["all_urls"] = urls
         self.config.save()
         self._process_details(urls, date_range_str)
 
     def _process_details(self, urls, date_range_str):
-        """
-        处理详情页，传入完整的 URL 列表。
-        若中断，进度（visited_urls）保留在配置中，下次可从配置恢复。
-        正常结束才标记 completed。
-        """
         config = self.config.data
         detail_prog = config.get("detail_progress", {})
         visited = set(detail_prog.get("visited_urls", []))
         saved_count = detail_prog.get("saved_count", 0)
         self.stats["total_saved"] = saved_count
 
-        # 计算待处理列表（总列表 - 已访问）
         pending = [u for u in urls if u not in visited]
         total = len(pending)
         logger.info(f"阶段2：处理详情页 ({total} 个待处理)")
 
         completed_normally = True
         consecutive_fail = 0
+        # 定义可重试的错误
+        RETRYABLE = ("blocked", "need_login", "timeout")
 
         for idx, url in enumerate(pending):
             logger.info(f"[{idx+1}/{total}] {url[:80]}")
@@ -854,62 +857,49 @@ class SfTaobaoScraper:
                 status = "error"
                 detail = result
 
-            if status == "blocked":
+            if status in RETRYABLE:
                 consecutive_fail += 1
                 if consecutive_fail >= 3:
                     if self._handle_blocked():
                         consecutive_fail = 0
-                        # 重试当前 url
+                        # 重试当前 URL
                         result = self.detail_scraper.fetch_detail(url)
                         if isinstance(result, tuple):
                             status, detail = result
                         else:
                             status = "error"
                             detail = result
-                        if status == "blocked":
-                            # 再次阻塞，放弃当前 URL
-                            visited.add(url)
-                            self.stats["total_failed"] += 1
-                        else:
-                            pass  # 继续处理这个 url 的后续逻辑（注意：这里需要重新进行过滤和保存，为简化代码，直接标记为已处理并跳过保存，实际可以改进）
-                            visited.add(url)
-                            self.stats["total_failed"] += 1
+                        if status in RETRYABLE:
+                            # 再次失败，放弃本次，但不标记 visited，下次可重试
+                            logger.warning("重试后仍失败，跳过本次（未标记已处理）")
+                            # 保存进度但不标记
+                            self.config.save()
+                            # 可选择是否 break，这里继续下一个 URL
+                            continue
                     else:
+                        # 用户主动终止
                         completed_normally = False
                         break
                 else:
-                    visited.add(url)
-                    self.stats["total_failed"] += 1
-                continue   # 已处理，跳过后续过滤
-
-            elif status == "need_login":
-                if self._handle_blocked():
-                    # 重试
-                    result = self.detail_scraper.fetch_detail(url)
-                    if isinstance(result, tuple):
-                        status, detail = result
-                    else:
-                        status = "error"
-                        detail = result
-                    if status != "ok":
-                        visited.add(url)
-                        self.stats["total_failed"] += 1
-                else:
-                    completed_normally = False
-                    break
-                continue
+                    # 未达阈值，不标记，继续下一个 URL
+                    logger.warning(f"异常状态 {status}，未标记已处理，将重试")
+                    # 不保存 visited，但更新配置保持其他字段
+                    # 仅保存以避免丢失其他进度
+                    self.config.save()
+                    continue
 
             elif status == "error":
-                visited.add(url)
                 self.stats["total_failed"] += 1
                 consecutive_fail += 1
                 if consecutive_fail >= 10:
                     logger.error("连续10次失败，暂停")
                     completed_normally = False
                     break
+                # 不标记 visited，下次可重试
+                self.config.save()
                 continue
 
-            # status == ok
+            # 成功获取数据
             consecutive_fail = 0
             visited.add(url)
 
@@ -924,20 +914,18 @@ class SfTaobaoScraper:
                 self._save_item(detail, date_range_str)
                 self.stats["total_saved"] += 1
 
-            # 更新详情进度
+            # 更新进度
             detail_prog["visited_urls"] = list(visited)
             detail_prog["saved_count"] = self.stats["total_saved"]
             self.config.save()
 
-        # 循环结束
         if completed_normally:
             self.config.mark_completed()
             logger.info("所有 URL 处理完毕，任务完成")
         else:
-            # 保持 in_progress 状态
             self.config.data["task_status"] = "in_progress"
             self.config.save()
-            logger.info("任务中断，进度已保存")
+            logger.info("详情处理中断，进度已保存")
 
     def _print_stats(self):
         elapsed = time.time() - self.stats["start_time"] if self.stats["start_time"] else 0
@@ -1009,8 +997,21 @@ def install_dependencies():
 def main():
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 法拍房数据爬取工具 v0.13 修订版         ║
+║       阿里司法拍卖 - 法拍房数据爬取工具 v0.15                ║
 ╚══════════════════════════════════════════════════════════════╝
+      ___           ___                       ___           ___           ___           ___     
+     /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \    
+    /::\  \       /:/  /         /\  \      /::|  |       /::\  \       /::|  |       /::\  \   
+   /:/\ \  \     /:/__/          \:\  \    /:|:|  |      /:/\:\  \     /:|:|  |      /:/\:\  \  
+  _\:\~\ \  \   /::\  \ ___      /::\__\  /:/|:|  |__   /::\~\:\  \   /:/|:|  |__   /:/  \:\  \ 
+ /\ \:\ \ \__\ /:/\:\  /\__\  __/:/\/__/ /:/ |:| /\__\ /:/\:\ \:\__\ /:/ |:| /\__\ /:/__/ \:\__\
+ 
+ \:\ \:\ \/__/ \/__\:\/:/  / /\/:/  /    \/__|:|/:/  / \/__\:\/:/  / \/__|:|/:/  / \:\  \ /:/  /
+  \:\ \:\__\        \::/  /  \::/__/         |:/:/  /       \::/  /      |:/:/  /   \:\  /:/  / 
+   \:\/:/  /        /:/  /    \:\__\         |::/  /        /:/  /       |::/  /     \:\/:/  /  
+    \::/  /        /:/  /      \/__/         /:/  /        /:/  /        /:/  /       \::/  /   
+     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
+                                                                                                                                                                                                                                                          
     """)
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
