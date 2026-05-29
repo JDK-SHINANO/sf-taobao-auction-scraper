@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 法拍房数据爬取工具 v0.22
+阿里司法拍卖 - 法拍房数据爬取工具 v0.23
 ============================================
 - 统一按键规范：[0]退出 [1]是/[2]否 [9]返回 [7]/[8]翻页
 - 菜单分页支持，统一视觉分隔线
 - 断点续传、反爬处理、表A/B提取等功能
 - 强化反爬：验证后自动刷新页面，增加更多反检测参数
+- 移除房屋类型关键字过滤，所有成交房源均保存
 """
 
 import re
@@ -58,9 +59,6 @@ MAX_DELAY = 5.0
 
 SUCCESS_KEYWORDS = ["本场已结束"]
 FAIL_KEYWORDS = ["本场已流拍，无人出价"]
-
-NON_RESIDENTIAL = ["商铺", "门面", "门市", "写字楼", "办公楼", "商业",
-                   "土地", "厂房", "仓库", "在建工程", "机器设备", "车辆", "股权", "债权"]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0",
@@ -314,8 +312,8 @@ def getch():
 # 统一视觉分隔线函数
 # ============================================================
 
-SEP_DOUBLE = "═" * 60   # 区块边界
-SEP_SINGLE = "=" * 30   # 标题下方分隔
+SEP_DOUBLE = "═" * 60
+SEP_SINGLE = "=" * 30
 
 def print_section_header(title):
     print("\n" + SEP_DOUBLE)
@@ -326,7 +324,6 @@ def print_section_footer():
     print(SEP_DOUBLE)
 
 def print_info_block(title, lines, show_footer=True):
-    """打印带分隔线的信息块"""
     print_section_header(title)
     for line in lines:
         print(line)
@@ -900,7 +897,6 @@ class SfTaobaoScraper:
 
     def start(self):
         self.stats["start_time"] = time.time()
-        # 强化反检测的浏览器配置
         if self.browser_type == "edge":
             opts = EdgeOptions()
             opts.add_argument("--no-sandbox")
@@ -928,7 +924,6 @@ class SfTaobaoScraper:
             svc = ChromeService(self.driver_path)
             self.driver = webdriver.Chrome(service=svc, options=opts)
 
-        # 隐藏 webdriver 标记
         self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         })
@@ -940,7 +935,6 @@ class SfTaobaoScraper:
             self.driver.refresh()
             time.sleep(2)
 
-        # 登录确认界面（统一分隔线）
         print("\n请在浏览器中手动登录淘宝账号（若已登录可忽略）")
         while True:
             print_section_header("登录状态确认")
@@ -994,12 +988,6 @@ class SfTaobaoScraper:
         logger.info(f"日志文件: {log_path}")
 
     def _handle_blocked(self, fail_count=0):
-        """
-        反爬处理（带视觉分隔线）
-        [1] 已完成验证 → 刷新页面后继续
-        [2] 未完成验证 → 跳过/暂停
-        [0] 退出程序
-        """
         print("\n⚠️ 检测到反爬验证，请在浏览器中手动完成验证")
         if fail_count >= 5:
             print("提示：如频繁遇到验证失败，可考虑安装 undetected-chromedriver 以获得更强的反检测能力。")
@@ -1017,7 +1005,6 @@ class SfTaobaoScraper:
                 print("程序已退出。")
                 sys.exit(0)
             elif ch == '1':
-                # 用户验证完成后，刷新页面以清除残留的反爬状态
                 try:
                     self.driver.refresh()
                     time.sleep(3)
@@ -1231,11 +1218,8 @@ class SfTaobaoScraper:
             consecutive_fail = 0
             visited.add(url)
 
-            title = detail.get("title", "")
-            if any(kw in title for kw in NON_RESIDENTIAL):
-                logger.info(f"⏭ 跳过非住宅: {title[:40]}")
-                self.stats["total_skipped"] += 1
-            elif not detail.get("is_success"):
+            # 只跳过未成交的，不再根据标题关键字跳过房屋类型
+            if not detail.get("is_success"):
                 logger.info(f"⏭ 跳过未成交: {detail.get('status')}")
                 self.stats["total_skipped"] += 1
             else:
@@ -1266,8 +1250,8 @@ class SfTaobaoScraper:
         elapsed = time.time() - self.stats["start_time"] if self.stats["start_time"] else 0
         print_info_block("📊 爬取统计", [
             f"总 URL 数量: {self.stats['total_urls']}",
-            f"已保存住宅: {self.stats['total_saved']}",
-            f"跳过数量: {self.stats['total_skipped']}",
+            f"已保存数量: {self.stats['total_saved']}",
+            f"跳过数量（未成交）: {self.stats['total_skipped']}",
             f"失败数量: {self.stats['total_failed']}",
             f"耗时: {elapsed/60:.1f} 分钟",
             f"输出目录: {self.output_root}",
@@ -1362,7 +1346,6 @@ def install_dependencies():
         return False
 
 def run_task_selection(config):
-    """任务参数选择菜单，返回 (city, category, district, biz_type, date_start, date_end, mode)"""
     cities = list(CITY_CONFIG.keys())
     city_idx = menu_select(cities, "选择城市")
     if city_idx == -1: return None
@@ -1392,7 +1375,6 @@ def run_task_selection(config):
     if mode_idx == -1: return run_task_selection(config)
     mode = "detail_only" if mode_idx == 1 else "full"
 
-    # 统一分隔线展示当前设置
     print_info_block("当前设置", [
         f"城市: {city}",
         f"房屋类型: {category}",
@@ -1407,7 +1389,7 @@ def run_task_selection(config):
 
 def main():
     print(BANNER)
-    print("欢迎使用[阿里司法拍卖 - 法拍房数据爬取工具 v0.22]\n")
+    print("欢迎使用[阿里司法拍卖 - 法拍房数据爬取工具 v0.23]\n")
 
     if not HAS_SELENIUM:
         print_info_block("❌ 未检测到 selenium", ["请先安装依赖。"])
