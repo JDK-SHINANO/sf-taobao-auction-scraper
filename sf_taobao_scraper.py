@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 法拍房数据爬取工具 v0.19
+阿里司法拍卖 - 法拍房数据爬取工具 v0.19.1
 ============================================
-- 统一按键规范：[0]退出 [9]返回 [7]/[8]翻页
+- 统一按键规范：[0]退出 [1]是/[2]否 [9]返回 [7]/[8]翻页
 - 菜单分页支持
 - 保留原有断点续传、反爬处理、表A/B提取等功能
+- 强化浏览器反检测配置
 """
 
 import re
@@ -128,7 +129,7 @@ BIZ_TYPE_CONFIG = {
 }
 
 # ============================================================
-# 日志
+# 日志配置
 # ============================================================
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -136,7 +137,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# 工具函数
+# 通用工具函数
 # ============================================================
 
 def get_script_dir():
@@ -286,7 +287,10 @@ def detect_browser():
     if shutil.which("google-chrome") or shutil.which("chrome"): return "chrome", None
     return None, None
 
-# 控制台单键输入支持
+# ============================================================
+# 控制台单键输入
+# ============================================================
+
 def getch():
     if sys.platform == 'win32':
         import msvcrt
@@ -307,10 +311,10 @@ def getch():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 # ============================================================
-# 菜单工具（新增分页、统一按键）
+# 菜单系统（支持分页，统一按键）
 # ============================================================
 
-PAGE_SIZE = 8  # 每页显示的选项数
+PAGE_SIZE = 8
 
 def menu_select(descriptions, prompt="请选择:", allow_back=True):
     """
@@ -324,7 +328,6 @@ def menu_select(descriptions, prompt="请选择:", allow_back=True):
     参数：
         descriptions: 选项描述列表
         prompt: 提示文字
-        allow_back: 保留参数，不影响行为（为了兼容旧调用）
     返回：
         选项索引 (0-based)，-1 表示返回上一级
     """
@@ -337,7 +340,6 @@ def menu_select(descriptions, prompt="请选择:", allow_back=True):
         print(f"\n{prompt} (第{current_page+1}/{max_page+1}页)" if max_page > 0 else f"\n{prompt}")
         for idx in range(start, end):
             print(f"  [{idx - start + 1}] {descriptions[idx]}")
-        # 显示导航
         nav = []
         if current_page < max_page:
             nav.append("[7] 下一页")
@@ -359,7 +361,7 @@ def menu_select(descriptions, prompt="请选择:", allow_back=True):
         elif key.isdigit():
             num = int(key)
             if 1 <= num <= (end - start):
-                return start + num - 1  # 全局索引
+                return start + num - 1
         else:
             print("无效按键，请重新输入")
 
@@ -368,31 +370,39 @@ def input_with_default(prompt, default):
     val = input(f"{prompt} (默认为 {default}): ").strip()
     return val if val else default
 
-def confirm(prompt="确认? (Y/N): "):
-    """确认提示，返回 True/False"""
+# ============================================================
+# 统一确认函数（数字键）
+# ============================================================
+
+def confirm(prompt="确认？"):
+    """
+    使用数字键确认：[1] 是 / [2] 否 / [0] 退出程序
+    返回 True (是), False (否) ，若选择退出则直接结束程序
+    """
     while True:
-        print(prompt, end="", flush=True)
+        print(f"\n{prompt}")
+        print("  [1] 是")
+        print("  [2] 否")
+        print("  [0] 退出程序")
         if sys.platform == 'win32':
-            ch = getch().upper()
-            print(ch)
-            if ch == 'Y':
-                return True
-            elif ch == 'N':
-                return False
+            ch = getch()
         else:
-            ans = input().strip().upper()
-            if ans == 'Y':
-                return True
-            elif ans == 'N':
-                return False
-        print("请输入 Y 或 N")
+            ch = input().strip()
+        if ch == '0':
+            print("程序已退出。")
+            sys.exit(0)
+        elif ch == '1':
+            return True
+        elif ch == '2':
+            return False
+        else:
+            print("无效按键，请重新输入")
 
 # ============================================================
 # URL 生成
 # ============================================================
 
 def build_list_url(city, category, district, biz_type, date_start, date_end):
-    """根据筛选参数构建列表页 URL"""
     city_info = CITY_CONFIG[city]
     gbk_city = city_info["gbk"]
     category_id = CATEGORY_CONFIG[category]
@@ -493,7 +503,7 @@ class ConfigManager:
         self.save()
 
 # ============================================================
-# 列表页爬取
+# 列表页爬取器
 # ============================================================
 
 class ListPageScraper:
@@ -501,7 +511,6 @@ class ListPageScraper:
         self.driver = driver
 
     def fetch_page(self, page_url):
-        """传入完整 URL，爬取一页数据"""
         logger.info(f"列表页: {page_url[:90]}...")
         try:
             self.driver.get(page_url)
@@ -574,7 +583,7 @@ class ListPageScraper:
         return result
 
 # ============================================================
-# 详情页爬取（完整版，与 v0.17 相同）
+# 详情页爬取器
 # ============================================================
 
 class DetailPageScraper:
@@ -866,7 +875,7 @@ def download_attachment(url, save_path, driver=None):
     return False
 
 # ============================================================
-# 主爬虫
+# 主爬虫控制器
 # ============================================================
 
 class SfTaobaoScraper:
@@ -884,11 +893,15 @@ class SfTaobaoScraper:
 
     def start(self):
         self.stats["start_time"] = time.time()
+        # 浏览器配置增强（反检测）
         if self.browser_type == "edge":
             opts = EdgeOptions()
             opts.add_argument("--no-sandbox")
             opts.add_argument("--disable-dev-shm-usage")
             opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option("useAutomationExtension", False)
+            opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
             opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
             svc = EdgeService(self.driver_path)
             self.driver = webdriver.Edge(service=svc, options=opts)
@@ -897,10 +910,14 @@ class SfTaobaoScraper:
             opts.add_argument("--no-sandbox")
             opts.add_argument("--disable-dev-shm-usage")
             opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option("useAutomationExtension", False)
+            opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
             opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
             svc = ChromeService(self.driver_path)
             self.driver = webdriver.Chrome(service=svc, options=opts)
 
+        # 隐藏 webdriver 标记
         self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         })
@@ -912,11 +929,29 @@ class SfTaobaoScraper:
             self.driver.refresh()
             time.sleep(2)
 
+        # 统一按键的登录确认
         print("\n请在浏览器中手动登录淘宝账号（若已登录可忽略）")
         while True:
-            choice = input("登录成功？(Y/N): ").strip().upper()
-            if choice == "Y":
+            print("登录成功了吗？")
+            print("  [1] 是，已登录")
+            print("  [2] 否，刷新后重试")
+            print("  [0] 退出程序")
+            if sys.platform == 'win32':
+                ch = getch()
+            else:
+                ch = input().strip()
+            if ch == '0':
+                print("程序已退出。")
+                sys.exit(0)
+            elif ch == '1':
                 break
+            elif ch == '2':
+                self.driver.refresh()
+                time.sleep(3)
+                print("请完成登录后再选择。")
+            else:
+                print("无效按键，请重试。")
+
         cookies = self.driver.get_cookies()
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         self.config.data["cookie"] = cookie_str
@@ -947,11 +982,31 @@ class SfTaobaoScraper:
         logger.info(f"日志文件: {log_path}")
 
     def _handle_blocked(self):
-        print("\n⚠️ 检测到反爬验证，请在浏览器中手动完成验证，完成后输入 Y 继续")
+        """
+        统一按键的反爬处理：
+        [1] 已完成验证，继续
+        [2] 未完成验证，跳过/暂停
+        [0] 退出程序
+        """
+        print("\n⚠️ 检测到反爬验证，请在浏览器中手动完成验证")
         while True:
-            c = input("是否已完成验证并继续？(Y/N): ").strip().upper()
-            if c == "Y": return True
-            if c == "N": return False
+            print("验证状态？")
+            print("  [1] 已完成验证，继续爬取")
+            print("  [2] 未完成验证，暂时跳过")
+            print("  [0] 退出程序")
+            if sys.platform == 'win32':
+                ch = getch()
+            else:
+                ch = input().strip()
+            if ch == '0':
+                print("程序已退出。")
+                sys.exit(0)
+            elif ch == '1':
+                return True
+            elif ch == '2':
+                return False
+            else:
+                print("无效按键，请重新输入。")
 
     def _deduplicate_urls(self, urls):
         seen = set()
@@ -1261,6 +1316,10 @@ BANNER = r"""
      \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
 """
 
+# ============================================================
+# 依赖安装与主入口
+# ============================================================
+
 def install_dependencies():
     print("正在安装依赖：selenium requests beautifulsoup4 ...")
     try:
@@ -1272,42 +1331,35 @@ def install_dependencies():
 
 def run_task_selection(config):
     """任务参数选择菜单，返回 (city, category, district, biz_type, date_start, date_end, mode)"""
-    # 选择城市
     cities = list(CITY_CONFIG.keys())
     city_idx = menu_select(cities, "选择城市")
     if city_idx == -1: return None
     city = cities[city_idx]
 
-    # 选择房屋类型
     categories = list(CATEGORY_CONFIG.keys())
     cat_idx = menu_select(categories, "选择房屋类型")
     if cat_idx == -1: return run_task_selection(config)
     category = categories[cat_idx]
 
-    # 选择区县
     districts = list(CITY_CONFIG[city]["districts"].keys())
     dist_idx = menu_select(districts, "选择区县")
     if dist_idx == -1: return run_task_selection(config)
     district = districts[dist_idx]
 
-    # 选择资产来源
     biz_types = list(BIZ_TYPE_CONFIG.keys())
     biz_idx = menu_select(biz_types, "选择资产来源")
     if biz_idx == -1: return run_task_selection(config)
     biz_type = biz_types[biz_idx]
 
-    # 输入日期
     print()
     date_start = input_with_default("开始日期 (YYYY-MM-DD)", "2024-01-01")
     date_end = input_with_default("结束日期 (YYYY-MM-DD)", "2026-03-31")
 
-    # 模式选择
     modes = ["完整模式（列表页 + 详情页）", "仅详情页（需要同目录下有 urls.txt）"]
     mode_idx = menu_select(modes, "选择运行模式")
     if mode_idx == -1: return run_task_selection(config)
     mode = "detail_only" if mode_idx == 1 else "full"
 
-    # 确认
     print(f"\n当前设置:")
     print(f"  城市: {city}")
     print(f"  房屋类型: {category}")
@@ -1315,18 +1367,17 @@ def run_task_selection(config):
     print(f"  资产来源: {biz_type}")
     print(f"  日期: {date_start} ~ {date_end}")
     print(f"  模式: {mode}")
-    if not confirm("确认开始？(Y/N): "):
+    if not confirm("确认开始？"):
         return run_task_selection(config)
     return city, category, district, biz_type, date_start, date_end, mode
 
 def main():
     print(BANNER)
-    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.19\n")
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.19.1\n")
 
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
-        ans = input("是否自动安装依赖？(Y/N): ").strip().upper()
-        if ans == "Y":
+        if confirm("是否自动安装依赖？"):
             if not install_dependencies():
                 print("安装失败，请手动执行: pip install selenium requests beautifulsoup4")
                 sys.exit(1)
@@ -1355,19 +1406,16 @@ def main():
 
     config = ConfigManager()
 
-    # 主菜单
     while True:
         options = []
         if config.is_task_in_progress():
             options.append("恢复未完成任务")
         options.append("新建任务")
         choice = menu_select(options, "主菜单")
-        if choice == -1:  # 按了 [9] 返回，但主菜单没有上一级，这里直接退出
+        if choice == -1:
             sys.exit(0)
 
-        # 确定是新建还是恢复
         if options[choice] == "恢复未完成任务":
-            # 直接使用配置中的参数
             city = config.data["city"]
             category = config.data["category"]
             district = config.data["district"]
@@ -1378,11 +1426,10 @@ def main():
             print(f"\n恢复任务：{city} {category} {district} {biz_type} {date_start} ~ {date_end} {mode}")
             break
         else:
-            # 新建任务
             config.reset_for_new_task()
             params = run_task_selection(config)
             if params is None:
-                continue  # 用户取消了选择，回到主菜单
+                continue
             city, category, district, biz_type, date_start, date_end, mode = params
             config.data["city"] = city
             config.data["category"] = category
