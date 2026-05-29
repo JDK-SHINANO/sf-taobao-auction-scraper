@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.14
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.15
 ============================================
-- 修复列表中断误入详情问题
-- 修复详情失败URL被永久跳过问题
-- 强化中断恢复逻辑，状态完全持久化
+- 精准提取成交价/成交日期/评估价（双源）
+- 标的物介绍表格精确匹配"标的物情况调查表"
+- 同时保存基本信息表格和标的物介绍表格
+- 自动生成 urls.txt 汇总文件
+- 启动界面 ASCII 艺术字
 """
 
 import re
@@ -240,10 +242,10 @@ DEFAULT_CONFIG = {
     "task_status": "not_started",
     "list_progress": {
         "last_page": 0,
-        "all_urls": []        # 未去重原始URL（列表阶段），完成后替换为去重列表
+        "all_urls": []
     },
     "detail_progress": {
-        "visited_urls": [],   # 已成功处理或跳过的URL
+        "visited_urls": [],
         "saved_count": 0
     },
     "last_update": ""
@@ -282,7 +284,6 @@ class ConfigManager:
 
     def mark_completed(self):
         self.data["task_status"] = "completed"
-        # 清除详细进度
         self.data["list_progress"]["all_urls"] = []
         self.data["list_progress"]["last_page"] = 0
         self.data["detail_progress"]["visited_urls"] = []
@@ -393,7 +394,7 @@ class ListPageScraper:
         return result
 
 # ============================================================
-# 详情页爬取
+# 详情页爬取（重构）
 # ============================================================
 
 class DetailPageScraper:
@@ -401,8 +402,19 @@ class DetailPageScraper:
         self.driver = driver
 
     def fetch_detail(self, url):
-        result = {"url": url, "auction_type": "", "title": "", "status": "",
-                  "is_success": False, "intro_table": {"table_rows": [], "raw": ""}, "attachments": []}
+        result = {
+            "url": url,
+            "auction_type": "",
+            "title": "",
+            "status": "",
+            "is_success": False,
+            "end_time": "",
+            "deal_price": "",
+            "assessment_price": "",
+            "basic_info_table": [],   # 表A
+            "intro_table": {"table_rows": [], "raw": ""},  # 表B
+            "attachments": [],
+        }
         try:
             self.driver.get(url)
             WebDriverWait(self.driver, 15).until(
@@ -418,94 +430,206 @@ class DetailPageScraper:
         if "login" in cur_url:
             return "need_login", result
 
-        body_text = self.driver.find_element(By.TAG_NAME, "body").text
-        result["title"] = self._extract_title()
-        result["auction_type"] = self._extract_auction_type(body_text)
-        status_info = self._extract_status(body_text)
+        # 提取名称和拍卖类型
+        result["title"], result["auction_type"] = self._extract_title_and_type()
+
+        # 提取结束时间
+        result["end_time"] = self._extract_end_time()
+
+        # 提取成交价
+        result["deal_price"] = self._extract_deal_price()
+
+        # 提取评估价
+        result["assessment_price"] = self._extract_assessment_price()
+
+        # 拍卖状态
+        status_info = self._extract_status()
         result["status"] = status_info["text"]
         result["is_success"] = status_info["success"]
+
+        # 表A：基本信息表格
+        result["basic_info_table"] = self._extract_basic_info_table()
+
+        # 表B：标的物介绍表格
         result["intro_table"] = self._extract_intro_table()
+
+        # 附件
         result["attachments"] = self._extract_attachments()
+
         return "ok", result
 
-    def _extract_title(self):
-        for sel in ["h1", ".pm-main h1", ".item-title", ".title h1",
-                    "[class*='title'] h1", "h1[class*='title']"]:
-            try:
-                el = self.driver.find_element(By.CSS_SELECTOR, sel)
-                t = el.text.strip()
-                if t and len(t) > 5: return t
-            except: pass
-        t = self.driver.title
-        if t:
-            return t.split("-")[0].strip().split("—")[0].strip()
-        return ""
+    def _extract_title_and_type(self):
+        """从 h1 提取名称和拍卖类型"""
+        title = ""
+        auction_type = ""
+        try:
+            h1 = self.driver.find_element(By.TAG_NAME, "h1")
+            full_text = h1.text.strip()
+            # 查找拍卖类型 span
+            status_spans = h1.find_elements(By.CSS_SELECTOR, "span.item-status")
+            if status_spans:
+                auction_type = status_spans[0].text.strip()
+                # 移除类型部分得到纯名称
+                title = full_text.replace(auction_type, "").strip()
+            else:
+                title = full_text
+        except NoSuchElementException:
+            pass
+        if not title:
+            title = self._extract_title_fallback()
+        # 若拍卖类型仍未提取，沿用旧逻辑
+        if not auction_type:
+            auction_type = self._extract_auction_type_fallback(title)
+        return title, auction_type
 
-    def _extract_auction_type(self, text):
-        title = self._extract_title()
+    def _extract_title_fallback(self):
+        try:
+            return self.driver.title.split("-")[0].strip()
+        except:
+            return ""
+
+    def _extract_auction_type_fallback(self, title):
         for kw in ["一拍", "二拍", "三拍", "变卖"]:
             if kw in title: return kw
-        m = re.search(r'(一拍|二拍|三拍|变卖)', text[:500])
+        body = self.driver.find_element(By.TAG_NAME, "body").text
+        m = re.search(r'(一拍|二拍|三拍|变卖)', body[:500])
         if m: return m.group(1)
-        url = self.driver.current_url
-        if "auction_type=" in url:
-            m = re.search(r'auction_type=(\d)', url)
-            if m:
-                return {"1": "一拍", "2": "二拍", "3": "三拍", "5": "变卖"}.get(m.group(1), "")
         return ""
 
-    def _extract_status(self, text):
-        search = text[:2000]
-        for kw in FAIL_KEYWORDS:
-            if kw in search:
-                for line in search.split('\n'):
-                    if kw in line: return {"text": line.strip(), "success": False}
-        for kw in SUCCESS_KEYWORDS:
-            if kw in search:
-                for line in search.split('\n'):
-                    if kw in line: return {"text": line.strip(), "success": True}
-        for sel in ["[class*='status']", "[class*='auction-status']", "[class*='state']", ".pm-status"]:
-            try:
-                el = self.driver.find_element(By.CSS_SELECTOR, sel)
-                t = el.text.strip()
-                if t:
-                    if any(k in t for k in FAIL_KEYWORDS): return {"text": t, "success": False}
-                    if any(k in t for k in SUCCESS_KEYWORDS): return {"text": t, "success": True}
-            except: pass
-        return {"text": "未知", "success": False}
-
-    def _extract_intro_table(self):
-        table_rows = []
-        raw_text = ""
+    def _extract_end_time(self):
         try:
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "#J_desc > table"))
-            )
-            table = self.driver.find_element(By.CSS_SELECTOR, "#J_desc > table")
-            table_rows = self._parse_table_to_grid(table)
-            try:
-                raw_text = self.driver.find_element(By.ID, "J_desc").text
-            except:
-                raw_text = self.driver.find_element(By.TAG_NAME, "body").text
-            if table_rows:
-                return {"table_rows": table_rows, "raw": raw_text}
-        except TimeoutException:
+            elem = self.driver.find_element(By.CSS_SELECTOR, "span.countdown.J_TimeLeft")
+            return elem.text.strip()
+        except NoSuchElementException:
+            return ""
+
+    def _extract_deal_price(self):
+        try:
+            elem = self.driver.find_element(By.CSS_SELECTOR, "span.pm-current-price em")
+            return elem.text.strip().replace(",", "") + "元"
+        except NoSuchElementException:
+            return "无"
+
+    def _extract_assessment_price(self):
+        """从表A或表B提取评估价/市场价/询价总价"""
+        # 1. 尝试从表A (rule-info 表格) 提取
+        try:
+            table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
+            rows = table_a.find_elements(By.TAG_NAME, "tr")
+            for row in rows:
+                # 每行可能有多个 key-value 列
+                keys = row.find_elements(By.CSS_SELECTOR, "span.key--lGkywRDE")
+                for key_elem in keys:
+                    key_text = key_elem.text.strip()
+                    if any(kw in key_text for kw in ["评估价", "市场价", "询价"]):
+                        # 在同级容器内找紧随的价格 span
+                        parent_td = key_elem.find_element(By.XPATH, "./ancestor::td[1]")
+                        try:
+                            price_elem = parent_td.find_element(By.CSS_SELECTOR, "span.family-tahoma")
+                            return price_elem.text.strip().replace(",", "") + "元"
+                        except:
+                            pass
+        except NoSuchElementException:
             pass
 
+        # 2. 从表B（标的物介绍表格）搜索“询价总价”等
         try:
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
-            for t in tables:
-                if len(t.find_elements(By.TAG_NAME, "tr")) < 2: continue
-                grid = self._parse_table_to_grid(t)
-                if grid and len(grid) > 1:
-                    table_rows = grid
+            table_b = self._find_intro_table()
+            if table_b:
+                rows = table_b.find_elements(By.TAG_NAME, "tr")
+                for row in rows:
+                    text = row.text
+                    # 搜索包含“询价总价”或“网络询价结果”的行
+                    if "询价总价" in text or "网络询价结果" in text:
+                        # 取行内最后一个数字
+                        nums = re.findall(r'[\d.]+', text)
+                        if nums:
+                            return nums[-1] + "元"
+        except:
+            pass
+        return "无"
+
+    def _extract_status(self):
+        """提取状态文本和是否成交"""
+        status_text = ""
+        # 优先从 firstDesc 元素获取
+        try:
+            elem = self.driver.find_element(By.CSS_SELECTOR, "span.firstDesc--G_zP45iR")
+            status_text = elem.text.strip()
+        except NoSuchElementException:
+            pass
+
+        if not status_text:
+            body = self.driver.find_element(By.TAG_NAME, "body").text
+            # 沿用关键词匹配
+            for kw in FAIL_KEYWORDS:
+                if kw in body[:2000]:
+                    return {"text": kw, "success": False}
+            for kw in SUCCESS_KEYWORDS:
+                if kw in body[:2000]:
+                    return {"text": kw, "success": True}
+            status_text = "未知"
+
+        # 根据状态文本判断成交
+        is_success = "已结束" in status_text and not any(fk in status_text for fk in ["流拍", "无人出价"])
+        return {"text": status_text, "success": is_success}
+
+    def _extract_basic_info_table(self):
+        """提取表A（基本信息表格），保存为二维列表"""
+        try:
+            table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
+            return self._parse_table_to_grid(table_a)
+        except NoSuchElementException:
+            return []
+
+    def _find_intro_table(self):
+        """精准定位标的物介绍表格（表B）"""
+        tables = self.driver.find_elements(By.TAG_NAME, "table")
+        for table in tables:
+            if "标的物情况调查表" in table.text:
+                return table
+        # 回退：查找包含“标的物介绍”标题后的第一个表格
+        try:
+            intro_headers = self.driver.find_elements(By.XPATH, "//*[contains(text(), '标的物介绍')]")
+            if intro_headers:
+                # 从标题往后找最近的 table
+                following_tables = intro_headers[0].find_elements(By.XPATH, "./following::table")
+                if following_tables:
+                    return following_tables[0]
+        except:
+            pass
+        # 最后回退 #J_desc > table
+        try:
+            return self.driver.find_element(By.CSS_SELECTOR, "#J_desc > table")
+        except NoSuchElementException:
+            return None
+
+    def _extract_intro_table(self):
+        """提取表B（标的物介绍表格）"""
+        table_rows = []
+        raw_text = ""
+        target_table = self._find_intro_table()
+        if target_table:
+            table_rows = self._parse_table_to_grid(target_table)
+            raw_text = target_table.text
+        else:
+            # 回退到旧逻辑：从 body 文本截取
+            body = self.driver.find_element(By.TAG_NAME, "body").text
+            intro_start = -1
+            for mk in ["标的物介绍", "拍卖标的基本情况", "标的物详情"]:
+                idx = body.find(mk)
+                if idx != -1:
+                    intro_start = idx + len(mk)
                     break
-            if not table_rows:
-                table_rows = self._fallback_text_parse()
-            if not raw_text:
-                raw_text = self.driver.find_element(By.TAG_NAME, "body").text
-        except Exception as e:
-            logger.warning(f"备选提取异常: {e}")
+            if intro_start != -1:
+                intro = body[intro_start:]
+                for em in ["竞买公告", "竞买须知", "拍卖规则", "附件", "相关附件",
+                           "重要提示", "竞买人条件", "咨询时间", "拍卖余款"]:
+                    idx = intro.find(em)
+                    if idx != -1: intro = intro[:idx]
+                raw_text = intro.strip()
+                # 尝试用文本解析生成两列表格
+                table_rows = self._fallback_text_parse(intro)
         return {"table_rows": table_rows, "raw": raw_text}
 
     def _parse_table_to_grid(self, table):
@@ -537,40 +661,22 @@ class DetailPageScraper:
                 c_idx += cs
         return [row for row in matrix if any(c and c.strip() for c in row)]
 
-    def _fallback_text_parse(self):
-        body = self.driver.find_element(By.TAG_NAME, "body")
-        page_text = body.text
-        intro_start = -1
-        for mk in ["标的物介绍", "拍卖标的基本情况", "标的物详情"]:
-            idx = page_text.find(mk)
-            if idx != -1:
-                intro_start = idx + len(mk)
-                break
-        if intro_start == -1:
-            return []
-        intro = page_text[intro_start:]
-        for em in ["竞买公告", "竞买须知", "拍卖规则", "附件", "相关附件",
-                   "重要提示", "竞买人条件", "咨询时间", "拍卖余款"]:
-            idx = intro.find(em)
-            if idx != -1: intro = intro[:idx]
-        table_data = {}
-        lines = [l.strip() for l in intro.split('\n') if l.strip()]
+    def _fallback_text_parse(self, text):
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        data = {}
         i = 0
         while i < len(lines):
             line = lines[i]
-            if len(line) < 2: i+=1; continue
             m = re.match(r'^([^：:]+)[：:]\s*(.+)$', line)
             if m:
-                table_data[m.group(1).strip()] = m.group(2).strip()
+                data[m.group(1).strip()] = m.group(2).strip()
             elif i+1 < len(lines):
                 nxt = lines[i+1]
                 if len(line) < 20 and not re.match(r'^[\d.]+', line) and nxt and line != nxt:
-                    table_data[line] = nxt
+                    data[line] = nxt
                     i += 1
             i += 1
-        if table_data:
-            return [["项目", "内容"]] + [[k, v] for k, v in table_data.items()]
-        return []
+        return [["项目", "内容"]] + [[k, v] for k, v in data.items()] if data else []
 
     def _extract_attachments(self):
         atts = []
@@ -633,6 +739,7 @@ class SfTaobaoScraper:
         self.stats = {"total_urls": 0, "total_saved": 0, "total_skipped": 0, "total_failed": 0, "start_time": None}
         self.output_root = os.path.join(get_script_dir(), "output")
         self.log_handler = None
+        self.saved_urls = []  # 收集已保存的URL，用于生成 urls.txt
 
     def start(self):
         self.stats["start_time"] = time.time()
@@ -722,19 +829,35 @@ class SfTaobaoScraper:
         item_dir = os.path.join(self.output_root, date_range_str, safe_title)
         safe_makedirs(item_dir)
 
-        with open(os.path.join(item_dir, "url.txt"), "w", encoding="utf-8") as f:
+        # 1. URL 文件（仍为 .url 文本文件）
+        with open(os.path.join(item_dir, f"{safe_title}.url"), "w", encoding="utf-8") as f:
             f.write(detail.get("url", ""))
-        info = [
-            f"拍卖类型: {detail.get('auction_type')}",
-            f"拍卖物名称: {detail.get('title')}",
-            f"拍卖状态: {detail.get('status')}",
-            f"是否成交: {'是' if detail.get('is_success') else '否'}",
-            f"详情页链接: {detail.get('url')}",
-            f"爬取时间: {datetime.now():%Y-%m-%d %H:%M:%S}",
-        ]
-        with open(os.path.join(item_dir, "拍卖信息.txt"), "w", encoding="utf-8") as f:
-            f.write("\n".join(info))
+        self.saved_urls.append(detail.get("url", ""))
 
+        # 2. 拍卖信息.txt
+        info_lines = [
+            f"拍卖物名称：{title}",
+            f"拍卖类型：{detail.get('auction_type')}",
+            f"拍卖状态：{detail.get('status')}",
+            f"是否成交：{'是' if detail.get('is_success') else '否'}",
+            f"成交日期：{detail.get('end_time')}",
+            f"成交价：{detail.get('deal_price')}",
+            f"评估价：{detail.get('assessment_price')}",
+            f"详情页链接：{detail.get('url')}",
+            f"爬取时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
+        ]
+        # 可选：附加表A中的保证金、起拍价（如果已提取，但我们可以不提取）
+        with open(os.path.join(item_dir, "拍卖信息.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(info_lines))
+
+        # 3. 基本信息表格 CSV（表A）
+        basic_rows = detail.get("basic_info_table", [])
+        if basic_rows:
+            with open(os.path.join(item_dir, "基本信息.csv"), "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerows(basic_rows)
+
+        # 4. 标的物介绍 CSV（表B）
         intro = detail.get("intro_table", {})
         rows = intro.get("table_rows", [])
         if rows:
@@ -746,6 +869,7 @@ class SfTaobaoScraper:
             with open(os.path.join(item_dir, "标的物介绍.txt"), "w", encoding="utf-8") as f:
                 f.write(raw)
 
+        # 5. 附件
         atts = detail.get("attachments", [])
         if atts:
             att_dir = os.path.join(item_dir, "附件")
@@ -766,6 +890,8 @@ class SfTaobaoScraper:
         else:
             self._run_detail_only(date_range_str)
         self._print_stats()
+        # 生成 urls.txt 汇总
+        self._save_urls_summary(date_range_str)
 
     def _run_full(self, date_start, date_end, date_range_str):
         config = self.config.data
@@ -788,7 +914,7 @@ class SfTaobaoScraper:
                 time.sleep(10)
                 continue
             if not items:
-                break   # 正常结束
+                break
 
             for it in items:
                 url = it.get("itemUrl")
@@ -802,18 +928,16 @@ class SfTaobaoScraper:
                 break
             random_delay()
 
-        # 用户中断，直接返回，不进入详情
         if user_aborted:
             logger.info("列表爬取被用户中断，进度已保存")
             self.config.data["task_status"] = "in_progress"
             self.config.save()
             return
 
-        # 正常结束列表阶段
         all_urls = self._deduplicate_urls(all_urls)
         logger.info(f"去重后 URL 数量: {len(all_urls)}")
         self.config.data["list_progress"]["all_urls"] = all_urls
-        self.config.data["list_progress"]["last_page"] = MAX_PAGES  # 标记完成
+        self.config.data["list_progress"]["last_page"] = MAX_PAGES
         self.config.save()
         self._process_details(all_urls, date_range_str)
 
@@ -843,7 +967,6 @@ class SfTaobaoScraper:
 
         completed_normally = True
         consecutive_fail = 0
-        # 定义可重试的错误
         RETRYABLE = ("blocked", "need_login", "timeout")
 
         for idx, url in enumerate(pending):
@@ -862,7 +985,6 @@ class SfTaobaoScraper:
                 if consecutive_fail >= 3:
                     if self._handle_blocked():
                         consecutive_fail = 0
-                        # 重试当前 URL
                         result = self.detail_scraper.fetch_detail(url)
                         if isinstance(result, tuple):
                             status, detail = result
@@ -870,21 +992,14 @@ class SfTaobaoScraper:
                             status = "error"
                             detail = result
                         if status in RETRYABLE:
-                            # 再次失败，放弃本次，但不标记 visited，下次可重试
                             logger.warning("重试后仍失败，跳过本次（未标记已处理）")
-                            # 保存进度但不标记
                             self.config.save()
-                            # 可选择是否 break，这里继续下一个 URL
                             continue
                     else:
-                        # 用户主动终止
                         completed_normally = False
                         break
                 else:
-                    # 未达阈值，不标记，继续下一个 URL
                     logger.warning(f"异常状态 {status}，未标记已处理，将重试")
-                    # 不保存 visited，但更新配置保持其他字段
-                    # 仅保存以避免丢失其他进度
                     self.config.save()
                     continue
 
@@ -895,11 +1010,9 @@ class SfTaobaoScraper:
                     logger.error("连续10次失败，暂停")
                     completed_normally = False
                     break
-                # 不标记 visited，下次可重试
                 self.config.save()
                 continue
 
-            # 成功获取数据
             consecutive_fail = 0
             visited.add(url)
 
@@ -914,7 +1027,6 @@ class SfTaobaoScraper:
                 self._save_item(detail, date_range_str)
                 self.stats["total_saved"] += 1
 
-            # 更新进度
             detail_prog["visited_urls"] = list(visited)
             detail_prog["saved_count"] = self.stats["total_saved"]
             self.config.save()
@@ -927,6 +1039,15 @@ class SfTaobaoScraper:
             self.config.save()
             logger.info("详情处理中断，进度已保存")
 
+    def _save_urls_summary(self, date_range_str):
+        """保存已爬取 URL 汇总文件，供仅详情页模式使用"""
+        if self.saved_urls:
+            summary_dir = os.path.join(self.output_root, date_range_str)
+            urls_file = os.path.join(summary_dir, "urls.txt")
+            with open(urls_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(self.saved_urls))
+            logger.info(f"URL 汇总已保存: {urls_file}")
+
     def _print_stats(self):
         elapsed = time.time() - self.stats["start_time"] if self.stats["start_time"] else 0
         print("\n" + "="*60)
@@ -936,6 +1057,7 @@ class SfTaobaoScraper:
         print(f"📁 输出: {self.output_root}")
 
     def save_summary(self, date_range_str):
+        # 原有的汇总 CSV（保留）
         summary_dir = os.path.join(self.output_root, date_range_str)
         if not os.path.isdir(summary_dir): return
         summary_file = os.path.join(summary_dir, "_汇总.csv")
@@ -982,6 +1104,24 @@ class SfTaobaoScraper:
             except: pass
 
 # ============================================================
+# ASCII 艺术字
+# ============================================================
+
+BANNER = r"""
+      ___           ___                       ___           ___           ___           ___     
+     /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \    
+    /::\  \       /:/  /         /\  \      /::|  |       /::\  \       /::|  |       /::\  \   
+   /:/\ \  \     /:/__/          \:\  \    /:|:|  |      /:/\:\  \     /:|:|  |      /:/\:\  \  
+  _\:\~\ \  \   /::\  \ ___      /::\__\  /:/|:|  |__   /::\~\:\  \   /:/|:|  |__   /:/  \:\  \ 
+ /\ \:\ \ \__\ /:/\:\  /\__\  __/:/\/__/ /:/ |:| /\__\ /:/\:\ \:\__\ /:/ |:| /\__\ /:/__/ \:\__\
+ \:\ \:\ \/__/ \/__\:\/:/  / /\/:/  /    \/__|:|/:/  / \/__\:\/:/  / \/__|:|/:/  / \:\  \ /:/  /
+  \:\ \:\__\        \::/  /  \::/__/         |:/:/  /       \::/  /      |:/:/  /   \:\  /:/  / 
+   \:\/:/  /        /:/  /    \:\__\         |::/  /        /:/  /       |::/  /     \:\/:/  /  
+    \::/  /        /:/  /      \/__/         /:/  /        /:/  /        /:/  /       \::/  /   
+     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
+"""
+
+# ============================================================
 # 入口
 # ============================================================
 
@@ -995,24 +1135,9 @@ def install_dependencies():
         return False
 
 def main():
-    print("""
-╔══════════════════════════════════════════════════════════════╗
-║       阿里司法拍卖 - 法拍房数据爬取工具 v0.15                ║
-╚══════════════════════════════════════════════════════════════╝
-      ___           ___                       ___           ___           ___           ___     
-     /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \    
-    /::\  \       /:/  /         /\  \      /::|  |       /::\  \       /::|  |       /::\  \   
-   /:/\ \  \     /:/__/          \:\  \    /:|:|  |      /:/\:\  \     /:|:|  |      /:/\:\  \  
-  _\:\~\ \  \   /::\  \ ___      /::\__\  /:/|:|  |__   /::\~\:\  \   /:/|:|  |__   /:/  \:\  \ 
- /\ \:\ \ \__\ /:/\:\  /\__\  __/:/\/__/ /:/ |:| /\__\ /:/\:\ \:\__\ /:/ |:| /\__\ /:/__/ \:\__\
- 
- \:\ \:\ \/__/ \/__\:\/:/  / /\/:/  /    \/__|:|/:/  / \/__\:\/:/  / \/__|:|/:/  / \:\  \ /:/  /
-  \:\ \:\__\        \::/  /  \::/__/         |:/:/  /       \::/  /      |:/:/  /   \:\  /:/  / 
-   \:\/:/  /        /:/  /    \:\__\         |::/  /        /:/  /       |::/  /     \:\/:/  /  
-    \::/  /        /:/  /      \/__/         /:/  /        /:/  /        /:/  /       \::/  /   
-     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
-                                                                                                                                                                                                                                                          
-    """)
+    print(BANNER)
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.15\n")
+
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
         ans = input("是否自动安装依赖？(Y/N): ").strip().upper()
