@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-欢迎使用[阿里司法拍卖 - 法拍房数据爬取工具 v0.21.0]
+阿里司法拍卖 - 法拍房数据爬取工具 v0.22
 ============================================
 - 统一按键规范：[0]退出 [1]是/[2]否 [9]返回 [7]/[8]翻页
-- 菜单分页支持
-- 保留原有断点续传、反爬处理、表A/B提取等功能
-- 强化浏览器反检测配置
-- 菜单界面优化：增加分隔线，提升可视性
+- 菜单分页支持，统一视觉分隔线
+- 断点续传、反爬处理、表A/B提取等功能
+- 强化反爬：验证后自动刷新页面，增加更多反检测参数
 """
 
 import re
@@ -312,44 +311,46 @@ def getch():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 # ============================================================
+# 统一视觉分隔线函数
+# ============================================================
+
+SEP_DOUBLE = "═" * 60   # 区块边界
+SEP_SINGLE = "=" * 30   # 标题下方分隔
+
+def print_section_header(title):
+    print("\n" + SEP_DOUBLE)
+    print(title)
+    print(SEP_SINGLE)
+
+def print_section_footer():
+    print(SEP_DOUBLE)
+
+def print_info_block(title, lines, show_footer=True):
+    """打印带分隔线的信息块"""
+    print_section_header(title)
+    for line in lines:
+        print(line)
+    if show_footer:
+        print_section_footer()
+
+# ============================================================
 # 菜单系统（支持分页，优化视觉分隔线）
 # ============================================================
 
 PAGE_SIZE = 8
 
 def menu_select(descriptions, prompt="请选择:", allow_back=True):
-    """
-    单键菜单选择，支持分页。
-    视觉优化：使用双横线和单横线分隔区域。
-    按键说明：
-        [0] 直接退出程序
-        [9] 返回上一级菜单（返回 -1）
-        [7] 下一页（如有）
-        [8] 上一页（如有）
-        [1]-[PAGE_SIZE] 选择对应选项
-    返回：
-        选项索引 (0-based)，-1 表示返回上一级
-    """
     total = len(descriptions)
     current_page = 0
-    max_page = (total - 1) // PAGE_SIZE  # 0-based
+    max_page = (total - 1) // PAGE_SIZE
     while True:
         start = current_page * PAGE_SIZE
         end = min(start + PAGE_SIZE, total)
-        # 上部双线 + 标题
-        if max_page > 0:
-            header = f"{prompt} (第{current_page+1}/{max_page+1}页)"
-        else:
-            header = prompt
-        print("\n" + "═" * 60)
-        print(header)
-        print("=" * 30)  # 单线分隔
-        # 选项列表
+        header = f"{prompt} (第{current_page+1}/{max_page+1}页)" if max_page > 0 else prompt
+        print_section_header(header)
         for idx in range(start, end):
             print(f"  [{idx - start + 1}] {descriptions[idx]}")
-        # 底部双线
-        print("═" * 60)
-        # 导航提示
+        print_section_footer()
         nav = []
         if current_page < max_page:
             nav.append("[7] 下一页")
@@ -376,7 +377,6 @@ def menu_select(descriptions, prompt="请选择:", allow_back=True):
             print("无效按键，请重新输入")
 
 def input_with_default(prompt, default):
-    """输入带默认值的字符串"""
     val = input(f"{prompt} (默认为 {default}): ").strip()
     return val if val else default
 
@@ -385,18 +385,12 @@ def input_with_default(prompt, default):
 # ============================================================
 
 def confirm(prompt="确认？"):
-    """
-    使用数字键确认：[1] 是 / [2] 否 / [0] 退出程序
-    视觉优化：双线包围，单线分隔选项。
-    """
     while True:
-        print("\n" + "═" * 60)
-        print(prompt)
-        print("=" * 30)
+        print_section_header(prompt)
         print("  [1] 是")
         print("  [2] 否")
         print("  [0] 退出程序")
-        print("═" * 60)
+        print_section_footer()
         if sys.platform == 'win32':
             ch = getch()
         else:
@@ -906,7 +900,7 @@ class SfTaobaoScraper:
 
     def start(self):
         self.stats["start_time"] = time.time()
-        # 浏览器配置增强（反检测）
+        # 强化反检测的浏览器配置
         if self.browser_type == "edge":
             opts = EdgeOptions()
             opts.add_argument("--no-sandbox")
@@ -915,6 +909,8 @@ class SfTaobaoScraper:
             opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             opts.add_experimental_option("useAutomationExtension", False)
             opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
+            opts.add_argument("--disable-extensions")
+            opts.add_argument("--disable-popup-blocking")
             opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
             svc = EdgeService(self.driver_path)
             self.driver = webdriver.Edge(service=svc, options=opts)
@@ -926,6 +922,8 @@ class SfTaobaoScraper:
             opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             opts.add_experimental_option("useAutomationExtension", False)
             opts.add_argument("--disable-features=IsolateOrigins,site-per-process")
+            opts.add_argument("--disable-extensions")
+            opts.add_argument("--disable-popup-blocking")
             opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
             svc = ChromeService(self.driver_path)
             self.driver = webdriver.Chrome(service=svc, options=opts)
@@ -942,16 +940,14 @@ class SfTaobaoScraper:
             self.driver.refresh()
             time.sleep(2)
 
-        # 统一按键的登录确认（带视觉分隔）
+        # 登录确认界面（统一分隔线）
         print("\n请在浏览器中手动登录淘宝账号（若已登录可忽略）")
         while True:
-            print("\n" + "═" * 60)
-            print("登录状态确认")
-            print("=" * 30)
+            print_section_header("登录状态确认")
             print("  [1] 已登录，继续")
             print("  [2] 未登录，刷新后重试")
             print("  [0] 退出程序")
-            print("═" * 60)
+            print_section_footer()
             if sys.platform == 'win32':
                 ch = getch()
             else:
@@ -997,22 +993,22 @@ class SfTaobaoScraper:
         self.log_handler = fh
         logger.info(f"日志文件: {log_path}")
 
-    def _handle_blocked(self):
+    def _handle_blocked(self, fail_count=0):
         """
-        统一按键的反爬处理，带视觉分隔线
-        [1] 已完成验证，继续
-        [2] 未完成验证，跳过/暂停
+        反爬处理（带视觉分隔线）
+        [1] 已完成验证 → 刷新页面后继续
+        [2] 未完成验证 → 跳过/暂停
         [0] 退出程序
         """
         print("\n⚠️ 检测到反爬验证，请在浏览器中手动完成验证")
+        if fail_count >= 5:
+            print("提示：如频繁遇到验证失败，可考虑安装 undetected-chromedriver 以获得更强的反检测能力。")
         while True:
-            print("\n" + "═" * 60)
-            print("反爬验证状态")
-            print("=" * 30)
+            print_section_header("反爬验证状态")
             print("  [1] 已完成验证，继续爬取")
             print("  [2] 未完成验证，暂时跳过")
             print("  [0] 退出程序")
-            print("═" * 60)
+            print_section_footer()
             if sys.platform == 'win32':
                 ch = getch()
             else:
@@ -1021,6 +1017,12 @@ class SfTaobaoScraper:
                 print("程序已退出。")
                 sys.exit(0)
             elif ch == '1':
+                # 用户验证完成后，刷新页面以清除残留的反爬状态
+                try:
+                    self.driver.refresh()
+                    time.sleep(3)
+                except:
+                    pass
                 return True
             elif ch == '2':
                 return False
@@ -1106,6 +1108,7 @@ class SfTaobaoScraper:
 
         logger.info("阶段1：收集拍品 URL")
         user_aborted = False
+        consecutive_blocked = 0
         for page in range(start_page, MAX_PAGES + 1):
             if "?" in list_base_url:
                 page_url = list_base_url + f"&page={page}"
@@ -1113,11 +1116,15 @@ class SfTaobaoScraper:
                 page_url = list_base_url + f"?page={page}"
             status, items = self.list_scraper.fetch_page(page_url)
             if status == "blocked":
-                if self._handle_blocked():
+                consecutive_blocked += 1
+                if self._handle_blocked(consecutive_blocked):
                     status, items = self.list_scraper.fetch_page(page_url)
                 else:
                     user_aborted = True
                     break
+            else:
+                consecutive_blocked = 0
+
             if status == "timeout":
                 time.sleep(10)
                 continue
@@ -1191,7 +1198,7 @@ class SfTaobaoScraper:
             if status in RETRYABLE:
                 consecutive_fail += 1
                 if consecutive_fail >= 3:
-                    if self._handle_blocked():
+                    if self._handle_blocked(consecutive_fail):
                         consecutive_fail = 0
                         result = self.detail_scraper.fetch_detail(url)
                         if isinstance(result, tuple):
@@ -1257,11 +1264,14 @@ class SfTaobaoScraper:
 
     def _print_stats(self):
         elapsed = time.time() - self.stats["start_time"] if self.stats["start_time"] else 0
-        print("\n" + "="*60)
-        print(f"📊 统计: 总URL {self.stats['total_urls']}, 已保存 {self.stats['total_saved']}, "
-              f"跳过 {self.stats['total_skipped']}, 失败 {self.stats['total_failed']}")
-        print(f"⏱ 耗时 {elapsed/60:.1f} 分钟")
-        print(f"📁 输出: {self.output_root}")
+        print_info_block("📊 爬取统计", [
+            f"总 URL 数量: {self.stats['total_urls']}",
+            f"已保存住宅: {self.stats['total_saved']}",
+            f"跳过数量: {self.stats['total_skipped']}",
+            f"失败数量: {self.stats['total_failed']}",
+            f"耗时: {elapsed/60:.1f} 分钟",
+            f"输出目录: {self.output_root}",
+        ])
 
     def save_summary(self, date_range_str):
         summary_dir = os.path.join(self.output_root, date_range_str)
@@ -1336,7 +1346,6 @@ BANNER = r"""
 ║     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/     ║
 ║                                                                                                 ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
-     
 """
 
 # ============================================================
@@ -1383,23 +1392,25 @@ def run_task_selection(config):
     if mode_idx == -1: return run_task_selection(config)
     mode = "detail_only" if mode_idx == 1 else "full"
 
-    print(f"\n当前设置:")
-    print(f"  城市: {city}")
-    print(f"  房屋类型: {category}")
-    print(f"  区县: {district}")
-    print(f"  资产来源: {biz_type}")
-    print(f"  日期: {date_start} ~ {date_end}")
-    print(f"  模式: {mode}")
+    # 统一分隔线展示当前设置
+    print_info_block("当前设置", [
+        f"城市: {city}",
+        f"房屋类型: {category}",
+        f"区县: {district}",
+        f"资产来源: {biz_type}",
+        f"日期范围: {date_start} ~ {date_end}",
+        f"运行模式: {mode}",
+    ])
     if not confirm("确认开始？"):
         return run_task_selection(config)
     return city, category, district, biz_type, date_start, date_end, mode
 
 def main():
     print(BANNER)
-    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.19.2\n")
+    print("欢迎使用[阿里司法拍卖 - 法拍房数据爬取工具 v0.22]\n")
 
     if not HAS_SELENIUM:
-        print("❌ 未检测到 selenium")
+        print_info_block("❌ 未检测到 selenium", ["请先安装依赖。"])
         if confirm("是否自动安装依赖？"):
             if not install_dependencies():
                 print("安装失败，请手动执行: pip install selenium requests beautifulsoup4")
@@ -1412,7 +1423,7 @@ def main():
 
     browser_type, driver_path = detect_browser()
     if not browser_type:
-        print("❌ 未检测到 Edge 或 Chrome 浏览器")
+        print_info_block("❌ 未检测到浏览器", ["请安装 Edge 或 Chrome。"])
         sys.exit(1)
     print(f"✓ 浏览器: {browser_type.upper()}")
 
@@ -1423,7 +1434,7 @@ def main():
         else:
             driver_path = download_chromedriver()
         if not driver_path:
-            print("❌ 自动下载失败，请手动放置 WebDriver 到脚本目录")
+            print_info_block("❌ 下载失败", ["请手动放置 WebDriver 到脚本目录。"])
             sys.exit(1)
         print(f"✓ WebDriver 已下载: {driver_path}")
 
@@ -1446,7 +1457,14 @@ def main():
             date_start = config.data["date_start"]
             date_end = config.data["date_end"]
             mode = config.data["mode"]
-            print(f"\n恢复任务：{city} {category} {district} {biz_type} {date_start} ~ {date_end} {mode}")
+            print_info_block("恢复任务", [
+                f"城市: {city}",
+                f"类型: {category}",
+                f"区县: {district}",
+                f"来源: {biz_type}",
+                f"日期: {date_start} ~ {date_end}",
+                f"模式: {mode}",
+            ])
             break
         else:
             config.reset_for_new_task()
