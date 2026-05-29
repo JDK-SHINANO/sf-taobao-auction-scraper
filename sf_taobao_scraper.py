@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.17
+阿里司法拍卖 - 法拍房数据爬取工具 v0.18.1
 ============================================
-- 删除冗余文件：标的物介绍.txt、.url
-- 保留基本信息.csv
-- 增强异常退出时进度保存（finally 强制保存配置）
-- 所有功能：断点续传、反爬处理、表A/表B提取、评估价双源、ASCII艺术字
+- 修复菜单选项编号，统一按键逻辑
+- 支持多城市/房屋类型/区县/资产来源筛选
+- 交互式菜单，单键选择（Windows 支持 msvcrt）
+- 动态 URL 生成
+- 保留原有断点续传、反爬处理、表A/B提取等功能
 """
 
 import re
@@ -51,8 +52,6 @@ except ImportError:
 # 配置常量
 # ============================================================
 
-LIST_CITY = "昆明"
-LIST_URL = "https://sf.taobao.com/list/50025969__2___{city_gbk}.htm"
 ITEMS_PER_PAGE = 40
 MAX_PAGES = 150
 MIN_DELAY = 2.0
@@ -69,6 +68,66 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
 ]
+
+# ============================================================
+# 城市/房屋类型/资产来源配置
+# ============================================================
+
+CITY_CONFIG = {
+    "昆明": {
+        "gbk": "%C0%A5%C3%F7",
+        "code": "530100",
+        "districts": {
+            "全市": None,
+            "五华区": "530102",
+            "盘龙区": "530103",
+            "官渡区": "530111",
+            "西山区": "530112",
+            "东川区": "530113",
+            "呈贡区": "530114",
+            "晋宁区": "530115",
+            "富民县": "530124",
+            "宜良县": "530125",
+            "石林彝族自治县": "530126",
+            "嵩明县": "530127",
+            "禄劝彝族苗族自治县": "530128",
+            "寻甸回族彝族自治县": "530129",
+            "安宁市": "530181",
+        }
+    },
+    "深圳": {
+        "gbk": "%C9%EE%DB%DA",
+        "code": "440300",
+        "districts": {
+            "全市": None,
+            "罗湖区": "440303",
+            "福田区": "440304",
+            "南山区": "440305",
+            "宝安区": "440306",
+            "龙岗区": "440307",
+            "盐田区": "440308",
+            "龙华区": "440309",
+            "坪山区": "440310",
+            "光明区": "440311",
+            "大鹏新区": "440312",
+        }
+    }
+}
+
+CATEGORY_CONFIG = {
+    "住宅用房": 50025969,
+    "商业用房": 200782003,
+    "工业用房": 200788003,
+    "其他用房": 200798003,
+}
+
+BIZ_TYPE_CONFIG = {
+    "不限资产类型": -1,
+    "涉刑资产": 4,
+    "诉讼资产": 6,
+    "破产资产": 8,
+    "自行处置": 10,
+}
 
 # ============================================================
 # 日志
@@ -229,12 +288,114 @@ def detect_browser():
     if shutil.which("google-chrome") or shutil.which("chrome"): return "chrome", None
     return None, None
 
+# 控制台单键输入支持
+def getch():
+    if sys.platform == 'win32':
+        import msvcrt
+        while True:
+            ch = msvcrt.getch()
+            if ch == b'\xe0':  # 功能键前导字节，再读一次
+                msvcrt.getch()
+                continue
+            return ch.decode('utf-8', errors='ignore')
+    else:
+        import tty, termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            return sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+# ============================================================
+# 菜单工具
+# ============================================================
+
+def menu_select(descriptions, prompt="请选择:", allow_back=True):
+    """单键菜单选择，选项自动从1开始编号，0为返回/退出。
+       参数:
+           descriptions: 选项描述列表
+           prompt: 提示文字
+           allow_back: True 表示0为“返回上一步”，False 表示0为“退出”
+       返回:
+           选项索引 (0-based)，-1 表示返回/退出
+    """
+    while True:
+        print(f"\n{prompt}")
+        for idx, desc in enumerate(descriptions, 1):
+            print(f"  [{idx}] {desc}")
+        if allow_back:
+            print("  [0] 返回上一步")
+        else:
+            print("  [0] 退出")
+        key = getch()
+        if key.isdigit():
+            num = int(key)
+            if 1 <= num <= len(descriptions):
+                return num - 1  # 转为索引
+            elif num == 0:
+                return -1
+        print("无效输入，请重新按键")
+
+def input_with_default(prompt, default):
+    """输入带默认值的字符串"""
+    val = input(f"{prompt} (默认为 {default}): ").strip()
+    return val if val else default
+
+def confirm(prompt="确认? (Y/N): "):
+    """确认提示，返回 True/False"""
+    while True:
+        print(prompt, end="", flush=True)
+        if sys.platform == 'win32':
+            ch = getch().upper()
+            print(ch)
+            if ch == 'Y':
+                return True
+            elif ch == 'N':
+                return False
+        else:
+            ans = input().strip().upper()
+            if ans == 'Y':
+                return True
+            elif ans == 'N':
+                return False
+        print("请输入 Y 或 N")
+
+# ============================================================
+# URL 生成
+# ============================================================
+
+def build_list_url(city, category, district, biz_type, date_start, date_end):
+    """根据筛选参数构建列表页 URL"""
+    city_info = CITY_CONFIG[city]
+    gbk_city = city_info["gbk"]
+    category_id = CATEGORY_CONFIG[category]
+    base = f"https://sf.taobao.com/list/{category_id}__2___{gbk_city}.htm"
+    params = {
+        "auction_source": "0",
+        "st_param": "-1",
+        "auction_start_seg": "0",
+        "auction_start_from": date_start,
+        "auction_start_to": date_end,
+    }
+    if biz_type != -1:
+        params["item_biz_type"] = biz_type
+    district_code = city_info["districts"].get(district)
+    if district_code:
+        params["location_code"] = district_code
+    return base + "?" + urllib.parse.urlencode(params)
+
 # ============================================================
 # 配置管理
 # ============================================================
 
 DEFAULT_CONFIG = {
     "cookie": "",
+    "city": "昆明",
+    "category": "住宅用房",
+    "district": "全市",
+    "biz_type": "不限资产类型",
     "date_start": "2024-01-01",
     "date_end": "2026-03-31",
     "mode": "full",
@@ -290,10 +451,18 @@ class ConfigManager:
 
     def reset_for_new_task(self):
         cookie = self.data.get("cookie", "")
+        city = self.data.get("city", "昆明")
+        category = self.data.get("category", "住宅用房")
+        district = self.data.get("district", "全市")
+        biz_type = self.data.get("biz_type", "不限资产类型")
         date_start = self.data.get("date_start", "2024-01-01")
         date_end = self.data.get("date_end", "2026-03-31")
         self.data = dict(DEFAULT_CONFIG)
         self.data["cookie"] = cookie
+        self.data["city"] = city
+        self.data["category"] = category
+        self.data["district"] = district
+        self.data["biz_type"] = biz_type
         self.data["date_start"] = date_start
         self.data["date_end"] = date_end
         self.save()
@@ -306,24 +475,11 @@ class ListPageScraper:
     def __init__(self, driver):
         self.driver = driver
 
-    def fetch_page(self, page, date_start=None, date_end=None):
-        city_gbk = urllib.parse.quote(LIST_CITY.encode("gbk"))
-        url = LIST_URL.format(city_gbk=city_gbk)
-        params = {
-            "auction_source": "0",
-            "st_param": "-1",
-            "auction_start_seg": "0",
-            "page": str(page),
-        }
-        if date_start:
-            params["auction_start_from"] = date_start
-        if date_end:
-            params["auction_start_to"] = date_end
-        full_url = url + "?" + urllib.parse.urlencode(params)
-
-        logger.info(f"列表页第 {page} 页")
+    def fetch_page(self, page_url):
+        """传入完整 URL，爬取一页数据"""
+        logger.info(f"列表页: {page_url[:90]}...")
         try:
-            self.driver.get(full_url)
+            self.driver.get(page_url)
             WebDriverWait(self.driver, 20).until(
                 lambda d: d.execute_script("return document.readyState") == "complete"
             )
@@ -393,7 +549,7 @@ class ListPageScraper:
         return result
 
 # ============================================================
-# 详情页爬取（重构）
+# 详情页爬取（与 v0.17 完全一致）
 # ============================================================
 
 class DetailPageScraper:
@@ -410,8 +566,8 @@ class DetailPageScraper:
             "end_time": "",
             "deal_price": "",
             "assessment_price": "",
-            "basic_info_table": [],   # 表A
-            "intro_table": {"table_rows": [], "raw": ""},  # 表B
+            "basic_info_table": [],
+            "intro_table": {"table_rows": [], "raw": ""},
             "attachments": [],
         }
         try:
@@ -429,46 +585,27 @@ class DetailPageScraper:
         if "login" in cur_url:
             return "need_login", result
 
-        # 提取名称和拍卖类型
         result["title"], result["auction_type"] = self._extract_title_and_type()
-
-        # 提取结束时间
         result["end_time"] = self._extract_end_time()
-
-        # 提取成交价
         result["deal_price"] = self._extract_deal_price()
-
-        # 提取评估价
         result["assessment_price"] = self._extract_assessment_price()
-
-        # 拍卖状态
         status_info = self._extract_status()
         result["status"] = status_info["text"]
         result["is_success"] = status_info["success"]
-
-        # 表A：基本信息表格
         result["basic_info_table"] = self._extract_basic_info_table()
-
-        # 表B：标的物介绍表格
         result["intro_table"] = self._extract_intro_table()
-
-        # 附件
         result["attachments"] = self._extract_attachments()
-
         return "ok", result
 
     def _extract_title_and_type(self):
-        """从 h1 提取名称和拍卖类型"""
         title = ""
         auction_type = ""
         try:
             h1 = self.driver.find_element(By.TAG_NAME, "h1")
             full_text = h1.text.strip()
-            # 查找拍卖类型 span
             status_spans = h1.find_elements(By.CSS_SELECTOR, "span.item-status")
             if status_spans:
                 auction_type = status_spans[0].text.strip()
-                # 移除类型部分得到纯名称
                 title = full_text.replace(auction_type, "").strip()
             else:
                 title = full_text
@@ -476,7 +613,6 @@ class DetailPageScraper:
             pass
         if not title:
             title = self._extract_title_fallback()
-        # 若拍卖类型仍未提取，沿用旧逻辑
         if not auction_type:
             auction_type = self._extract_auction_type_fallback(title)
         return title, auction_type
@@ -510,18 +646,14 @@ class DetailPageScraper:
             return "无"
 
     def _extract_assessment_price(self):
-        """从表A或表B提取评估价/市场价/询价总价"""
-        # 1. 尝试从表A (rule-info 表格) 提取
         try:
             table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
             rows = table_a.find_elements(By.TAG_NAME, "tr")
             for row in rows:
-                # 每行可能有多个 key-value 列
                 keys = row.find_elements(By.CSS_SELECTOR, "span.key--lGkywRDE")
                 for key_elem in keys:
                     key_text = key_elem.text.strip()
                     if any(kw in key_text for kw in ["评估价", "市场价", "询价"]):
-                        # 在同级容器内找紧随的价格 span
                         parent_td = key_elem.find_element(By.XPATH, "./ancestor::td[1]")
                         try:
                             price_elem = parent_td.find_element(By.CSS_SELECTOR, "span.family-tahoma")
@@ -531,16 +663,13 @@ class DetailPageScraper:
         except NoSuchElementException:
             pass
 
-        # 2. 从表B（标的物介绍表格）搜索“询价总价”等
         try:
             table_b = self._find_intro_table()
             if table_b:
                 rows = table_b.find_elements(By.TAG_NAME, "tr")
                 for row in rows:
                     text = row.text
-                    # 搜索包含“询价总价”或“网络询价结果”的行
                     if "询价总价" in text or "网络询价结果" in text:
-                        # 取行内最后一个数字
                         nums = re.findall(r'[\d.]+', text)
                         if nums:
                             return nums[-1] + "元"
@@ -549,9 +678,7 @@ class DetailPageScraper:
         return "无"
 
     def _extract_status(self):
-        """提取状态文本和是否成交"""
         status_text = ""
-        # 优先从 firstDesc 元素获取
         try:
             elem = self.driver.find_element(By.CSS_SELECTOR, "span.firstDesc--G_zP45iR")
             status_text = elem.text.strip()
@@ -560,7 +687,6 @@ class DetailPageScraper:
 
         if not status_text:
             body = self.driver.find_element(By.TAG_NAME, "body").text
-            # 沿用关键词匹配
             for kw in FAIL_KEYWORDS:
                 if kw in body[:2000]:
                     return {"text": kw, "success": False}
@@ -569,12 +695,10 @@ class DetailPageScraper:
                     return {"text": kw, "success": True}
             status_text = "未知"
 
-        # 根据状态文本判断成交
         is_success = "已结束" in status_text and not any(fk in status_text for fk in ["流拍", "无人出价"])
         return {"text": status_text, "success": is_success}
 
     def _extract_basic_info_table(self):
-        """提取表A（基本信息表格），保存为二维列表"""
         try:
             table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
             return self._parse_table_to_grid(table_a)
@@ -582,29 +706,24 @@ class DetailPageScraper:
             return []
 
     def _find_intro_table(self):
-        """精准定位标的物介绍表格（表B）"""
         tables = self.driver.find_elements(By.TAG_NAME, "table")
         for table in tables:
             if "标的物情况调查表" in table.text:
                 return table
-        # 回退：查找包含“标的物介绍”标题后的第一个表格
         try:
             intro_headers = self.driver.find_elements(By.XPATH, "//*[contains(text(), '标的物介绍')]")
             if intro_headers:
-                # 从标题往后找最近的 table
                 following_tables = intro_headers[0].find_elements(By.XPATH, "./following::table")
                 if following_tables:
                     return following_tables[0]
         except:
             pass
-        # 最后回退 #J_desc > table
         try:
             return self.driver.find_element(By.CSS_SELECTOR, "#J_desc > table")
         except NoSuchElementException:
             return None
 
     def _extract_intro_table(self):
-        """提取表B（标的物介绍表格）"""
         table_rows = []
         raw_text = ""
         target_table = self._find_intro_table()
@@ -612,7 +731,6 @@ class DetailPageScraper:
             table_rows = self._parse_table_to_grid(target_table)
             raw_text = target_table.text
         else:
-            # 回退到旧逻辑：从 body 文本截取
             body = self.driver.find_element(By.TAG_NAME, "body").text
             intro_start = -1
             for mk in ["标的物介绍", "拍卖标的基本情况", "标的物详情"]:
@@ -627,7 +745,6 @@ class DetailPageScraper:
                     idx = intro.find(em)
                     if idx != -1: intro = intro[:idx]
                 raw_text = intro.strip()
-                # 尝试用文本解析生成两列表格
                 table_rows = self._fallback_text_parse(intro)
         return {"table_rows": table_rows, "raw": raw_text}
 
@@ -738,7 +855,7 @@ class SfTaobaoScraper:
         self.stats = {"total_urls": 0, "total_saved": 0, "total_skipped": 0, "total_failed": 0, "start_time": None}
         self.output_root = os.path.join(get_script_dir(), "output")
         self.log_handler = None
-        self.saved_urls = []  # 收集已保存的URL，用于生成 urls.txt
+        self.saved_urls = []
 
     def start(self):
         self.stats["start_time"] = time.time()
@@ -828,7 +945,6 @@ class SfTaobaoScraper:
         item_dir = os.path.join(self.output_root, date_range_str, safe_title)
         safe_makedirs(item_dir)
 
-        # 1. 拍卖信息.txt
         info_lines = [
             f"拍卖物名称：{title}",
             f"拍卖类型：{detail.get('auction_type')}",
@@ -842,26 +958,21 @@ class SfTaobaoScraper:
         ]
         with open(os.path.join(item_dir, "拍卖信息.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(info_lines))
-        # 收集URL用于汇总
         self.saved_urls.append(detail.get("url", ""))
 
-        # 2. 基本信息表格 CSV（表A）
         basic_rows = detail.get("basic_info_table", [])
         if basic_rows:
             with open(os.path.join(item_dir, "基本信息.csv"), "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerows(basic_rows)
 
-        # 3. 标的物介绍 CSV（表B）
         intro = detail.get("intro_table", {})
         rows = intro.get("table_rows", [])
         if rows:
             with open(os.path.join(item_dir, "标的物介绍.csv"), "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerows(rows)
-        # 不保存标的物介绍.txt（冗余已删除）
 
-        # 4. 附件
         atts = detail.get("attachments", [])
         if atts:
             att_dir = os.path.join(item_dir, "附件")
@@ -874,17 +985,20 @@ class SfTaobaoScraper:
         logger.info(f"✓ 已保存: {safe_title[:50]}")
         return item_dir
 
-    def run(self, date_start, date_end, mode):
+    def run(self, city, category, district, biz_type, date_start, date_end, mode):
         date_range_str = f"{date_start}_to_{date_end}"
         self._setup_log_file(date_range_str)
+
         if mode == "full":
-            self._run_full(date_start, date_end, date_range_str)
+            list_url = build_list_url(city, category, district, biz_type, date_start, date_end)
+            self._run_full(list_url, date_range_str)
         else:
             self._run_detail_only(date_range_str)
+
         self._print_stats()
         self._save_urls_summary(date_range_str)
 
-    def _run_full(self, date_start, date_end, date_range_str):
+    def _run_full(self, list_base_url, date_range_str):
         config = self.config.data
         list_prog = config.get("list_progress", {})
         last_page = list_prog.get("last_page", 0)
@@ -894,10 +1008,14 @@ class SfTaobaoScraper:
         logger.info("阶段1：收集拍品 URL")
         user_aborted = False
         for page in range(start_page, MAX_PAGES + 1):
-            status, items = self.list_scraper.fetch_page(page, date_start, date_end)
+            if "?" in list_base_url:
+                page_url = list_base_url + f"&page={page}"
+            else:
+                page_url = list_base_url + f"?page={page}"
+            status, items = self.list_scraper.fetch_page(page_url)
             if status == "blocked":
                 if self._handle_blocked():
-                    status, items = self.list_scraper.fetch_page(page, date_start, date_end)
+                    status, items = self.list_scraper.fetch_page(page_url)
                 else:
                     user_aborted = True
                     break
@@ -1062,7 +1180,6 @@ class SfTaobaoScraper:
                         if ":" in line:
                             k, v = line.split(":", 1)
                             row[k.strip()] = v.strip()
-            # 从CSV提取摘要（可选，这里简单读取标的物介绍CSV的第一列）
             intro_csv = os.path.join(d, "标的物介绍.csv")
             if os.path.isfile(intro_csv):
                 try:
@@ -1070,7 +1187,7 @@ class SfTaobaoScraper:
                         reader = csv.reader(f)
                         for line in reader:
                             if line:
-                                row["标的物摘要"] = line[0][:50]  # 第一列前50字
+                                row["标的物摘要"] = line[0][:50]
                                 break
                 except:
                     pass
@@ -1096,7 +1213,6 @@ class SfTaobaoScraper:
         if self.driver:
             try: self.driver.quit()
             except: pass
-        # 确保最终进度被保存
         try:
             self.config.save()
         except:
@@ -1120,10 +1236,6 @@ BANNER = r"""
      \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
 """
 
-# ============================================================
-# 入口
-# ============================================================
-
 def install_dependencies():
     print("正在安装依赖：selenium requests beautifulsoup4 ...")
     try:
@@ -1133,9 +1245,58 @@ def install_dependencies():
         print(f"安装失败: {e}")
         return False
 
+def run_task_selection(config):
+    """任务参数选择菜单，返回 (city, category, district, biz_type, date_start, date_end, mode)"""
+    # 选择城市
+    cities = list(CITY_CONFIG.keys())
+    city_idx = menu_select(cities, "选择城市:")
+    if city_idx == -1: return None
+    city = cities[city_idx]
+
+    # 选择房屋类型
+    categories = list(CATEGORY_CONFIG.keys())
+    cat_idx = menu_select(categories, "选择房屋类型:")
+    if cat_idx == -1: return run_task_selection(config)
+    category = categories[cat_idx]
+
+    # 选择区县
+    districts = list(CITY_CONFIG[city]["districts"].keys())
+    dist_idx = menu_select(districts, "选择区县:")
+    if dist_idx == -1: return run_task_selection(config)
+    district = districts[dist_idx]
+
+    # 选择资产来源
+    biz_types = list(BIZ_TYPE_CONFIG.keys())
+    biz_idx = menu_select(biz_types, "选择资产来源:")
+    if biz_idx == -1: return run_task_selection(config)
+    biz_type = biz_types[biz_idx]
+
+    # 输入日期
+    print()
+    date_start = input_with_default("开始日期 (YYYY-MM-DD)", "2024-01-01")
+    date_end = input_with_default("结束日期 (YYYY-MM-DD)", "2026-03-31")
+
+    # 模式选择
+    modes = ["完整模式（列表页 + 详情页）", "仅详情页（需要同目录下有 urls.txt）"]
+    mode_idx = menu_select(modes, "选择运行模式:")
+    if mode_idx == -1: return run_task_selection(config)
+    mode = "detail_only" if mode_idx == 1 else "full"
+
+    # 确认
+    print(f"\n当前设置:")
+    print(f"  城市: {city}")
+    print(f"  房屋类型: {category}")
+    print(f"  区县: {district}")
+    print(f"  资产来源: {biz_type}")
+    print(f"  日期: {date_start} ~ {date_end}")
+    print(f"  模式: {mode}")
+    if not confirm("确认开始？(Y/N): "):
+        return run_task_selection(config)
+    return city, category, district, biz_type, date_start, date_end, mode
+
 def main():
     print(BANNER)
-    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.17\n")
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.18.1\n")
 
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
@@ -1168,63 +1329,61 @@ def main():
         print(f"✓ WebDriver 已下载: {driver_path}")
 
     config = ConfigManager()
-    if config.is_task_in_progress():
-        print("\n⚠️ 检测到未完成的任务")
-        ans = input("是否恢复上次进度？(Y/N): ").strip().upper()
-        if ans == "Y":
+
+    # 主菜单
+    while True:
+        options = []
+        if config.is_task_in_progress():
+            options.append("恢复未完成任务")
+        options.append("新建任务")
+        choice = menu_select(options, "主菜单", allow_back=False)
+        if choice == -1:  # 0 退出
+            sys.exit(0)
+
+        # 确定是新建还是恢复
+        if options[choice] == "恢复未完成任务":
+            # 直接使用配置中的参数
+            city = config.data["city"]
+            category = config.data["category"]
+            district = config.data["district"]
+            biz_type = config.data["biz_type"]
             date_start = config.data["date_start"]
             date_end = config.data["date_end"]
             mode = config.data["mode"]
-            print(f"恢复任务：{date_start} ~ {date_end}，模式：{mode}")
+            print(f"\n恢复任务：{city} {category} {district} {biz_type} {date_start} ~ {date_end} {mode}")
+            break
         else:
+            # 新建任务
             config.reset_for_new_task()
-            date_start = input("开始日期 (默认 2024-01-01): ").strip() or "2024-01-01"
-            date_end = input("结束日期 (默认 2026-03-31): ").strip() or "2026-03-31"
-            mode = input("模式: 1=完整 2=仅详情页 (默认 1): ").strip()
-            mode = "detail_only" if mode == "2" else "full"
+            params = run_task_selection(config)
+            if params is None:
+                continue  # 用户取消了选择，回到主菜单
+            city, category, district, biz_type, date_start, date_end, mode = params
+            config.data["city"] = city
+            config.data["category"] = category
+            config.data["district"] = district
+            config.data["biz_type"] = biz_type
             config.data["date_start"] = date_start
             config.data["date_end"] = date_end
             config.data["mode"] = mode
             config.data["task_status"] = "in_progress"
             config.save()
-    elif config.is_task_completed():
-        print("\n上次任务已完成")
-        ans = input("是否开始新任务？(Y/N): ").strip().upper()
-        if ans != "Y":
-            sys.exit(0)
-        config.reset_for_new_task()
-        date_start = input("开始日期 (默认 2024-01-01): ").strip() or "2024-01-01"
-        date_end = input("结束日期 (默认 2026-03-31): ").strip() or "2026-03-31"
-        mode = input("模式: 1=完整 2=仅详情页 (默认 1): ").strip()
-        mode = "detail_only" if mode == "2" else "full"
-        config.data["date_start"] = date_start
-        config.data["date_end"] = date_end
-        config.data["mode"] = mode
-        config.data["task_status"] = "in_progress"
-        config.save()
-    else:
-        date_start = input("开始日期 (默认 2024-01-01): ").strip() or "2024-01-01"
-        date_end = input("结束日期 (默认 2026-03-31): ").strip() or "2026-03-31"
-        mode = input("模式: 1=完整 2=仅详情页 (默认 1): ").strip()
-        mode = "detail_only" if mode == "2" else "full"
-        config.data["date_start"] = date_start
-        config.data["date_end"] = date_end
-        config.data["mode"] = mode
-        config.data["task_status"] = "in_progress"
-        config.save()
+            break
 
     scraper = SfTaobaoScraper(config, browser_type, driver_path)
-    date_range_str = f"{config.data['date_start']}_to_{config.data['date_end']}"
     try:
         scraper.start()
-        scraper.run(config.data["date_start"], config.data["date_end"], config.data["mode"])
+        scraper.run(city, category, district, biz_type, date_start, date_end, mode)
+        date_range_str = f"{date_start}_to_{date_end}"
         scraper.save_summary(date_range_str)
     except KeyboardInterrupt:
         logger.info("用户中断，进度已保存")
+        date_range_str = f"{date_start}_to_{date_end}"
         scraper.save_summary(date_range_str)
     except Exception as e:
         logger.error(f"异常退出: {e}")
         import traceback; traceback.print_exc()
+        date_range_str = f"{date_start}_to_{date_end}"
         scraper.save_summary(date_range_str)
     finally:
         scraper.stop()
