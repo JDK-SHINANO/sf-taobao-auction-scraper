@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.15
+阿里司法拍卖 - 昆明市法拍房数据爬取工具 v0.17
 ============================================
-- 精准提取成交价/成交日期/评估价（双源）
-- 标的物介绍表格精确匹配"标的物情况调查表"
-- 同时保存基本信息表格和标的物介绍表格
-- 自动生成 urls.txt 汇总文件
-- 启动界面 ASCII 艺术字
+- 删除冗余文件：标的物介绍.txt、.url
+- 保留基本信息.csv
+- 增强异常退出时进度保存（finally 强制保存配置）
+- 所有功能：断点续传、反爬处理、表A/表B提取、评估价双源、ASCII艺术字
 """
 
 import re
@@ -829,12 +828,7 @@ class SfTaobaoScraper:
         item_dir = os.path.join(self.output_root, date_range_str, safe_title)
         safe_makedirs(item_dir)
 
-        # 1. URL 文件（仍为 .url 文本文件）
-        with open(os.path.join(item_dir, f"{safe_title}.url"), "w", encoding="utf-8") as f:
-            f.write(detail.get("url", ""))
-        self.saved_urls.append(detail.get("url", ""))
-
-        # 2. 拍卖信息.txt
+        # 1. 拍卖信息.txt
         info_lines = [
             f"拍卖物名称：{title}",
             f"拍卖类型：{detail.get('auction_type')}",
@@ -846,30 +840,28 @@ class SfTaobaoScraper:
             f"详情页链接：{detail.get('url')}",
             f"爬取时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
         ]
-        # 可选：附加表A中的保证金、起拍价（如果已提取，但我们可以不提取）
         with open(os.path.join(item_dir, "拍卖信息.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(info_lines))
+        # 收集URL用于汇总
+        self.saved_urls.append(detail.get("url", ""))
 
-        # 3. 基本信息表格 CSV（表A）
+        # 2. 基本信息表格 CSV（表A）
         basic_rows = detail.get("basic_info_table", [])
         if basic_rows:
             with open(os.path.join(item_dir, "基本信息.csv"), "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerows(basic_rows)
 
-        # 4. 标的物介绍 CSV（表B）
+        # 3. 标的物介绍 CSV（表B）
         intro = detail.get("intro_table", {})
         rows = intro.get("table_rows", [])
         if rows:
             with open(os.path.join(item_dir, "标的物介绍.csv"), "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerows(rows)
-        raw = intro.get("raw", "")
-        if raw:
-            with open(os.path.join(item_dir, "标的物介绍.txt"), "w", encoding="utf-8") as f:
-                f.write(raw)
+        # 不保存标的物介绍.txt（冗余已删除）
 
-        # 5. 附件
+        # 4. 附件
         atts = detail.get("attachments", [])
         if atts:
             att_dir = os.path.join(item_dir, "附件")
@@ -890,7 +882,6 @@ class SfTaobaoScraper:
         else:
             self._run_detail_only(date_range_str)
         self._print_stats()
-        # 生成 urls.txt 汇总
         self._save_urls_summary(date_range_str)
 
     def _run_full(self, date_start, date_end, date_range_str):
@@ -1040,7 +1031,6 @@ class SfTaobaoScraper:
             logger.info("详情处理中断，进度已保存")
 
     def _save_urls_summary(self, date_range_str):
-        """保存已爬取 URL 汇总文件，供仅详情页模式使用"""
         if self.saved_urls:
             summary_dir = os.path.join(self.output_root, date_range_str)
             urls_file = os.path.join(summary_dir, "urls.txt")
@@ -1057,7 +1047,6 @@ class SfTaobaoScraper:
         print(f"📁 输出: {self.output_root}")
 
     def save_summary(self, date_range_str):
-        # 原有的汇总 CSV（保留）
         summary_dir = os.path.join(self.output_root, date_range_str)
         if not os.path.isdir(summary_dir): return
         summary_file = os.path.join(summary_dir, "_汇总.csv")
@@ -1073,13 +1062,18 @@ class SfTaobaoScraper:
                         if ":" in line:
                             k, v = line.split(":", 1)
                             row[k.strip()] = v.strip()
-            intro_file = os.path.join(d, "标的物介绍.txt")
-            if os.path.isfile(intro_file):
+            # 从CSV提取摘要（可选，这里简单读取标的物介绍CSV的第一列）
+            intro_csv = os.path.join(d, "标的物介绍.csv")
+            if os.path.isfile(intro_csv):
                 try:
-                    with open(intro_file, "r", encoding="utf-8") as f:
-                        text = f.read(500).replace('\n', ' ').replace('\r', ' ')
-                    row["标的物介绍摘要"] = text[:200]
-                except: pass
+                    with open(intro_csv, "r", encoding="utf-8-sig") as f:
+                        reader = csv.reader(f)
+                        for line in reader:
+                            if line:
+                                row["标的物摘要"] = line[0][:50]  # 第一列前50字
+                                break
+                except:
+                    pass
             att_dir = os.path.join(d, "附件")
             if os.path.isdir(att_dir):
                 row["附件数量"] = str(len(os.listdir(att_dir)))
@@ -1102,6 +1096,11 @@ class SfTaobaoScraper:
         if self.driver:
             try: self.driver.quit()
             except: pass
+        # 确保最终进度被保存
+        try:
+            self.config.save()
+        except:
+            pass
 
 # ============================================================
 # ASCII 艺术字
@@ -1136,7 +1135,7 @@ def install_dependencies():
 
 def main():
     print(BANNER)
-    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.15\n")
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.17\n")
 
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
