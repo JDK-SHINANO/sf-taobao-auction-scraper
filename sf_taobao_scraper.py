@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 法拍房数据爬取工具 v0.18.1
+阿里司法拍卖 - 法拍房数据爬取工具 v0.19
 ============================================
-- 修复菜单选项编号，统一按键逻辑
-- 支持多城市/房屋类型/区县/资产来源筛选
-- 交互式菜单，单键选择（Windows 支持 msvcrt）
-- 动态 URL 生成
+- 统一按键规范：[0]退出 [9]返回 [7]/[8]翻页
+- 菜单分页支持
 - 保留原有断点续传、反爬处理、表A/B提取等功能
 """
 
@@ -309,34 +307,61 @@ def getch():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 # ============================================================
-# 菜单工具
+# 菜单工具（新增分页、统一按键）
 # ============================================================
 
+PAGE_SIZE = 8  # 每页显示的选项数
+
 def menu_select(descriptions, prompt="请选择:", allow_back=True):
-    """单键菜单选择，选项自动从1开始编号，0为返回/退出。
-       参数:
-           descriptions: 选项描述列表
-           prompt: 提示文字
-           allow_back: True 表示0为“返回上一步”，False 表示0为“退出”
-       返回:
-           选项索引 (0-based)，-1 表示返回/退出
     """
+    单键菜单选择，支持分页。
+    按键说明：
+        [0] 直接退出程序
+        [9] 返回上一级菜单（返回 -1）
+        [7] 下一页（如有）
+        [8] 上一页（如有）
+        [1]-[PAGE_SIZE] 选择对应选项
+    参数：
+        descriptions: 选项描述列表
+        prompt: 提示文字
+        allow_back: 保留参数，不影响行为（为了兼容旧调用）
+    返回：
+        选项索引 (0-based)，-1 表示返回上一级
+    """
+    total = len(descriptions)
+    current_page = 0
+    max_page = (total - 1) // PAGE_SIZE  # 0-based
     while True:
-        print(f"\n{prompt}")
-        for idx, desc in enumerate(descriptions, 1):
-            print(f"  [{idx}] {desc}")
-        if allow_back:
-            print("  [0] 返回上一步")
-        else:
-            print("  [0] 退出")
+        start = current_page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        print(f"\n{prompt} (第{current_page+1}/{max_page+1}页)" if max_page > 0 else f"\n{prompt}")
+        for idx in range(start, end):
+            print(f"  [{idx - start + 1}] {descriptions[idx]}")
+        # 显示导航
+        nav = []
+        if current_page < max_page:
+            nav.append("[7] 下一页")
+        if current_page > 0:
+            nav.append("[8] 上一页")
+        nav.append("[9] 返回上一级")
+        nav.append("[0] 退出程序")
+        print("  " + " | ".join(nav))
         key = getch()
-        if key.isdigit():
+        if key == '0':
+            print("程序已退出。")
+            sys.exit(0)
+        elif key == '9':
+            return -1
+        elif key == '7' and current_page < max_page:
+            current_page += 1
+        elif key == '8' and current_page > 0:
+            current_page -= 1
+        elif key.isdigit():
             num = int(key)
-            if 1 <= num <= len(descriptions):
-                return num - 1  # 转为索引
-            elif num == 0:
-                return -1
-        print("无效输入，请重新按键")
+            if 1 <= num <= (end - start):
+                return start + num - 1  # 全局索引
+        else:
+            print("无效按键，请重新输入")
 
 def input_with_default(prompt, default):
     """输入带默认值的字符串"""
@@ -549,7 +574,7 @@ class ListPageScraper:
         return result
 
 # ============================================================
-# 详情页爬取（与 v0.17 完全一致）
+# 详情页爬取（完整版，与 v0.17 相同）
 # ============================================================
 
 class DetailPageScraper:
@@ -1249,25 +1274,25 @@ def run_task_selection(config):
     """任务参数选择菜单，返回 (city, category, district, biz_type, date_start, date_end, mode)"""
     # 选择城市
     cities = list(CITY_CONFIG.keys())
-    city_idx = menu_select(cities, "选择城市:")
+    city_idx = menu_select(cities, "选择城市")
     if city_idx == -1: return None
     city = cities[city_idx]
 
     # 选择房屋类型
     categories = list(CATEGORY_CONFIG.keys())
-    cat_idx = menu_select(categories, "选择房屋类型:")
+    cat_idx = menu_select(categories, "选择房屋类型")
     if cat_idx == -1: return run_task_selection(config)
     category = categories[cat_idx]
 
     # 选择区县
     districts = list(CITY_CONFIG[city]["districts"].keys())
-    dist_idx = menu_select(districts, "选择区县:")
+    dist_idx = menu_select(districts, "选择区县")
     if dist_idx == -1: return run_task_selection(config)
     district = districts[dist_idx]
 
     # 选择资产来源
     biz_types = list(BIZ_TYPE_CONFIG.keys())
-    biz_idx = menu_select(biz_types, "选择资产来源:")
+    biz_idx = menu_select(biz_types, "选择资产来源")
     if biz_idx == -1: return run_task_selection(config)
     biz_type = biz_types[biz_idx]
 
@@ -1278,7 +1303,7 @@ def run_task_selection(config):
 
     # 模式选择
     modes = ["完整模式（列表页 + 详情页）", "仅详情页（需要同目录下有 urls.txt）"]
-    mode_idx = menu_select(modes, "选择运行模式:")
+    mode_idx = menu_select(modes, "选择运行模式")
     if mode_idx == -1: return run_task_selection(config)
     mode = "detail_only" if mode_idx == 1 else "full"
 
@@ -1296,7 +1321,7 @@ def run_task_selection(config):
 
 def main():
     print(BANNER)
-    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.18.1\n")
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.19\n")
 
     if not HAS_SELENIUM:
         print("❌ 未检测到 selenium")
@@ -1336,8 +1361,8 @@ def main():
         if config.is_task_in_progress():
             options.append("恢复未完成任务")
         options.append("新建任务")
-        choice = menu_select(options, "主菜单", allow_back=False)
-        if choice == -1:  # 0 退出
+        choice = menu_select(options, "主菜单")
+        if choice == -1:  # 按了 [9] 返回，但主菜单没有上一级，这里直接退出
             sys.exit(0)
 
         # 确定是新建还是恢复
