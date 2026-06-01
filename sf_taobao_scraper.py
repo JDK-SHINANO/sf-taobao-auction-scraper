@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 法拍房数据爬取工具 v0.23
+阿里司法拍卖 - 法拍房数据爬取工具 v0.19.5
 ============================================
 - 统一按键规范：[0]退出 [1]是/[2]否 [9]返回 [7]/[8]翻页
 - 菜单分页支持，统一视觉分隔线
 - 断点续传、反爬处理、表A/B提取等功能
 - 强化反爬：验证后自动刷新页面，增加更多反检测参数
 - 移除房屋类型关键字过滤，所有成交房源均保存
+- 新增滑块特征检测（class="warnning-text"），列表页/详情页自动拦截
 """
 
 import re
@@ -514,6 +515,13 @@ class ListPageScraper:
     def __init__(self, driver):
         self.driver = driver
 
+    def _is_blocked(self):
+        """检测是否出现滑块验证"""
+        try:
+            return len(self.driver.find_elements(By.CSS_SELECTOR, "div.warnning-text")) > 0
+        except:
+            return False
+
     def fetch_page(self, page_url):
         logger.info(f"列表页: {page_url[:90]}...")
         try:
@@ -525,6 +533,11 @@ class ListPageScraper:
         except TimeoutException:
             logger.warning("加载超时")
             return "timeout", []
+
+        # 检查滑块特征（优先于URL判断，因为滑块页面URL可能仍是正常URL）
+        if self._is_blocked():
+            logger.error("⚠️ 检测到滑块验证")
+            return "blocked", []
 
         cur_url = self.driver.current_url
         if any(k in cur_url for k in ["deny", "punish", "login"]):
@@ -594,6 +607,13 @@ class DetailPageScraper:
     def __init__(self, driver):
         self.driver = driver
 
+    def _is_blocked(self):
+        """检测是否出现滑块验证"""
+        try:
+            return len(self.driver.find_elements(By.CSS_SELECTOR, "div.warnning-text")) > 0
+        except:
+            return False
+
     def fetch_detail(self, url):
         result = {
             "url": url,
@@ -617,6 +637,10 @@ class DetailPageScraper:
         except TimeoutException:
             return result
 
+        # 检查滑块
+        if self._is_blocked():
+            return "blocked", result
+
         cur_url = self.driver.current_url
         if "deny" in cur_url or "punish" in cur_url:
             return "blocked", result
@@ -628,6 +652,9 @@ class DetailPageScraper:
         result["deal_price"] = self._extract_deal_price()
         result["assessment_price"] = self._extract_assessment_price()
         status_info = self._extract_status()
+        # 如果状态提取检测到滑块，直接返回blocked
+        if status_info.get("text") == "blocked":
+            return "blocked", result
         result["status"] = status_info["text"]
         result["is_success"] = status_info["success"]
         result["basic_info_table"] = self._extract_basic_info_table()
@@ -716,6 +743,10 @@ class DetailPageScraper:
         return "无"
 
     def _extract_status(self):
+        # 首先检测滑块，避免误判为未知状态
+        if self._is_blocked():
+            return {"text": "blocked", "success": False}
+
         status_text = ""
         try:
             elem = self.driver.find_element(By.CSS_SELECTOR, "span.firstDesc--G_zP45iR")
@@ -731,6 +762,9 @@ class DetailPageScraper:
             for kw in SUCCESS_KEYWORDS:
                 if kw in body[:2000]:
                     return {"text": kw, "success": True}
+            # 在输出“未知”前再次确认滑块
+            if self._is_blocked():
+                return {"text": "blocked", "success": False}
             status_text = "未知"
 
         is_success = "已结束" in status_text and not any(fk in status_text for fk in ["流拍", "无人出价"])
@@ -1316,20 +1350,17 @@ class SfTaobaoScraper:
 # ============================================================
 
 BANNER = r"""
-╔═════════════════════════════════════════════════════════════════════════════════════════════════╗
-║      ___           ___                       ___           ___           ___           ___      ║
-║     /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \     ║
-║    /::\  \       /:/  /         /\  \      /::|  |       /::\  \       /::|  |       /::\  \    ║
-║   /:/\ \  \     /:/__/          \:\  \    /:|:|  |      /:/\:\  \     /:|:|  |      /:/\:\  \   ║
-║  _\:\~\ \  \   /::\  \ ___      /::\__\  /:/|:|  |__   /::\~\:\  \   /:/|:|  |__   /:/  \:\  \  ║
-║ /\ \:\ \ \__\ /:/\:\  /\__\  __/:/\/__/ /:/ |:| /\__\ /:/\:\ \:\__\ /:/ |:| /\__\ /:/__/ \:\__\ ║
-║ \:\ \:\ \/__/ \/__\:\/:/  / /\/:/  /    \/__|:|/:/  / \/__\:\/:/  / \/__|:|/:/  / \:\  \ /:/  / ║
-║  \:\ \:\__\        \::/  /  \::/__/         |:/:/  /       \::/  /      |:/:/  /   \:\  /:/  /  ║
-║   \:\/:/  /        /:/  /    \:\__\         |::/  /        /:/  /       |::/  /     \:\/:/  /   ║
-║    \::/  /        /:/  /      \/__/         /:/  /        /:/  /        /:/  /       \::/  /    ║
-║     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/     ║
-║                                                                                                 ║
-╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
+      ___           ___                       ___           ___           ___           ___     
+     /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \    
+    /::\  \       /:/  /         /\  \      /::|  |       /::\  \       /::|  |       /::\  \   
+   /:/\ \  \     /:/__/          \:\  \    /:|:|  |      /:/\:\  \     /:|:|  |      /:/\:\  \  
+  _\:\~\ \  \   /::\  \ ___      /::\__\  /:/|:|  |__   /::\~\:\  \   /:/|:|  |__   /:/  \:\  \ 
+ /\ \:\ \ \__\ /:/\:\  /\__\  __/:/\/__/ /:/ |:| /\__\ /:/\:\ \:\__\ /:/ |:| /\__\ /:/__/ \:\__\
+ \:\ \:\ \/__/ \/__\:\/:/  / /\/:/  /    \/__|:|/:/  / \/__\:\/:/  / \/__|:|/:/  / \:\  \ /:/  /
+  \:\ \:\__\        \::/  /  \::/__/         |:/:/  /       \::/  /      |:/:/  /   \:\  /:/  / 
+   \:\/:/  /        /:/  /    \:\__\         |::/  /        /:/  /       |::/  /     \:\/:/  /  
+    \::/  /        /:/  /      \/__/         /:/  /        /:/  /        /:/  /       \::/  /   
+     \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
 """
 
 # ============================================================
@@ -1389,7 +1420,7 @@ def run_task_selection(config):
 
 def main():
     print(BANNER)
-    print("欢迎使用[阿里司法拍卖 - 法拍房数据爬取工具 v0.23]\n")
+    print("阿里司法拍卖 - 法拍房数据爬取工具 v0.19.5\n")
 
     if not HAS_SELENIUM:
         print_info_block("❌ 未检测到 selenium", ["请先安装依赖。"])
