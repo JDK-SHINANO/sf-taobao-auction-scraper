@@ -28,7 +28,9 @@ def merge_items(items, output_file):
             for target in TARGET_FILES:
                 filepath = os.path.join(item_path, target)
                 if os.path.isfile(filepath):
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    # CSV 由爬虫以 utf-8-sig 写出（带 BOM），统一按 utf-8-sig 读，
+                    # 否则 BOM 字符会混进合并结果的第一格
+                    with open(filepath, "r", encoding="utf-8-sig") as f:
                         out.write(f.read())
                     out.write("\n")
             out.write("\n")

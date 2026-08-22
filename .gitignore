@@ -1,0 +1,10 @@
+# 隐私数据
+crawl_config.json
+output/
+
+# 运行时产物
+urls.txt
+*.log
+*.exe
+__pycache__/
+*.pyc

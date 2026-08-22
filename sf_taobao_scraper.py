@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阿里司法拍卖 - 法拍房数据爬取工具 v0.19.5
+阿里司法拍卖 - 法拍房数据爬取工具 v1.0.0（25TH）
 ============================================
 - 统一按键规范：[0]退出 [1]是/[2]否 [9]返回 [7]/[8]翻页
 - 菜单分页支持，统一视觉分隔线
@@ -9,6 +9,16 @@
 - 强化反爬：验证后自动刷新页面，增加更多反检测参数
 - 移除房屋类型关键字过滤，所有成交房源均保存
 - 新增滑块特征检测（class="warnning-text"），列表页/详情页自动拦截
+
+v1.0.0（25TH）变更：
+- 页面 CSS 选择器集中至常量区，改版后只需改一处
+- 配置文件深合并，嵌套进度字段缺失不再 KeyError
+- 附件下载改用 requests + 浏览器 Cookie 双通道，移除无效的 driver.get 兜底
+- 控制台编码兜底（Windows GBK 打印 emoji 不再崩溃）
+- 异常处理不再引用未定义变量
+- 修复资产来源筛选 bug：biz_type 界面传中文名，旧版直接拼进 URL
+  （item_biz_type=不限资产类型），资产类型筛选实际从未生效；
+  现映射为接口数字编码，-1（不限）时不附加参数
 """
 
 import re
@@ -60,6 +70,19 @@ MAX_DELAY = 5.0
 
 SUCCESS_KEYWORDS = ["本场已结束"]
 FAIL_KEYWORDS = ["本场已流拍，无人出价"]
+
+# ============================================================
+# 页面 CSS 选择器（淘宝前端为 hash 类名，页面改版后失效点集中于此）
+# ============================================================
+SEL_SLIDER_WARNING = "div.warnning-text"          # 滑块验证特征
+SEL_ITEM_LIST_DATA = "sf-item-list-data"         # 列表页 JSON 数据节点 id
+SEL_COUNTDOWN = "span.countdown.J_TimeLeft"      # 成交时间倒计时
+SEL_DEAL_PRICE = "span.pm-current-price em"      # 成交价
+SEL_RULE_INFO_TABLE = "table[pm-ui*='rule-info']"  # 表A：标的物基本信息
+SEL_RULE_KEY = "span.key--lGkywRDE"              # 表A 键名
+SEL_RULE_PRICE = "span.family-tahoma"            # 表A 价格数字
+SEL_STATUS = "span.firstDesc--G_zP45iR"          # 拍卖状态文字
+SEL_ITEM_LINK = "a[href*='sf-item'], a[href*='susong-item'], a[href*='auction']"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0",
@@ -134,6 +157,14 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
                     datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
+
+# Windows 控制台默认 GBK，打印 emoji/制表符会 UnicodeEncodeError；
+# 在 import 阶段就把 stdout/stderr 重配为 UTF-8（旧版 Python 无 reconfigure 则忽略）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # ============================================================
 # 通用工具函数
@@ -419,8 +450,11 @@ def build_list_url(city, category, district, biz_type, date_start, date_end):
         "auction_start_from": date_start,
         "auction_start_to": date_end,
     }
-    if biz_type != -1:
-        params["item_biz_type"] = biz_type
+    # biz_type 在界面上是中文名，映射成接口要求的数字编码；
+    # 编码为 -1（不限资产类型）时不附加该参数
+    biz_code = BIZ_TYPE_CONFIG.get(biz_type, -1)
+    if biz_code != -1:
+        params["item_biz_type"] = biz_code
     district_code = city_info["districts"].get(district)
     if district_code:
         params["location_code"] = district_code
@@ -451,6 +485,16 @@ DEFAULT_CONFIG = {
     "last_update": ""
 }
 
+def _deep_merge(defaults, override):
+    """递归合并配置：override 优先，嵌套 dict 逐层合并而非整体覆盖。"""
+    merged = dict(defaults)
+    for key, val in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(val, dict):
+            merged[key] = _deep_merge(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
+
 class ConfigManager:
     def __init__(self, config_path=None):
         if config_path is None:
@@ -463,13 +507,10 @@ class ConfigManager:
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                for key, val in DEFAULT_CONFIG.items():
-                    if key not in config:
-                        config[key] = val
-                return config
-            except:
-                pass
-        return dict(DEFAULT_CONFIG)
+                return _deep_merge(DEFAULT_CONFIG, config)
+            except Exception as e:
+                logger.warning(f"配置文件读取失败，使用默认配置: {e}")
+        return _deep_merge(DEFAULT_CONFIG, {})
 
     def save(self):
         self.data["last_update"] = datetime.now().isoformat()
@@ -497,7 +538,7 @@ class ConfigManager:
         biz_type = self.data.get("biz_type", "不限资产类型")
         date_start = self.data.get("date_start", "2024-01-01")
         date_end = self.data.get("date_end", "2026-03-31")
-        self.data = dict(DEFAULT_CONFIG)
+        self.data = _deep_merge(DEFAULT_CONFIG, {})
         self.data["cookie"] = cookie
         self.data["city"] = city
         self.data["category"] = category
@@ -518,7 +559,7 @@ class ListPageScraper:
     def _is_blocked(self):
         """检测是否出现滑块验证"""
         try:
-            return len(self.driver.find_elements(By.CSS_SELECTOR, "div.warnning-text")) > 0
+            return len(self.driver.find_elements(By.CSS_SELECTOR, SEL_SLIDER_WARNING)) > 0
         except:
             return False
 
@@ -546,7 +587,7 @@ class ListPageScraper:
 
         items = []
         try:
-            script_el = self.driver.find_element(By.ID, "sf-item-list-data")
+            script_el = self.driver.find_element(By.ID, SEL_ITEM_LIST_DATA)
             text = script_el.get_attribute("innerHTML").strip()
             if text:
                 data = json.loads(text)
@@ -556,7 +597,7 @@ class ListPageScraper:
         except: pass
 
         page_source = self.driver.page_source
-        m = re.search(r'id="sf-item-list-data"[^>]*>(.*?)</script>', page_source, re.DOTALL)
+        m = re.search(rf'id="{SEL_ITEM_LIST_DATA}"[^>]*>(.*?)</script>', page_source, re.DOTALL)
         if m:
             try:
                 data = json.loads(m.group(1).strip())
@@ -566,8 +607,7 @@ class ListPageScraper:
             except: pass
 
         try:
-            links = self.driver.find_elements(By.CSS_SELECTOR,
-                "a[href*='sf-item'], a[href*='susong-item'], a[href*='auction']")
+            links = self.driver.find_elements(By.CSS_SELECTOR, SEL_ITEM_LINK)
             seen = set()
             for link in links:
                 href = link.get_attribute("href") or ""
@@ -610,7 +650,7 @@ class DetailPageScraper:
     def _is_blocked(self):
         """检测是否出现滑块验证"""
         try:
-            return len(self.driver.find_elements(By.CSS_SELECTOR, "div.warnning-text")) > 0
+            return len(self.driver.find_elements(By.CSS_SELECTOR, SEL_SLIDER_WARNING)) > 0
         except:
             return False
 
@@ -698,30 +738,30 @@ class DetailPageScraper:
 
     def _extract_end_time(self):
         try:
-            elem = self.driver.find_element(By.CSS_SELECTOR, "span.countdown.J_TimeLeft")
+            elem = self.driver.find_element(By.CSS_SELECTOR, SEL_COUNTDOWN)
             return elem.text.strip()
         except NoSuchElementException:
             return ""
 
     def _extract_deal_price(self):
         try:
-            elem = self.driver.find_element(By.CSS_SELECTOR, "span.pm-current-price em")
+            elem = self.driver.find_element(By.CSS_SELECTOR, SEL_DEAL_PRICE)
             return elem.text.strip().replace(",", "") + "元"
         except NoSuchElementException:
             return "无"
 
     def _extract_assessment_price(self):
         try:
-            table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
+            table_a = self.driver.find_element(By.CSS_SELECTOR, SEL_RULE_INFO_TABLE)
             rows = table_a.find_elements(By.TAG_NAME, "tr")
             for row in rows:
-                keys = row.find_elements(By.CSS_SELECTOR, "span.key--lGkywRDE")
+                keys = row.find_elements(By.CSS_SELECTOR, SEL_RULE_KEY)
                 for key_elem in keys:
                     key_text = key_elem.text.strip()
                     if any(kw in key_text for kw in ["评估价", "市场价", "询价"]):
                         parent_td = key_elem.find_element(By.XPATH, "./ancestor::td[1]")
                         try:
-                            price_elem = parent_td.find_element(By.CSS_SELECTOR, "span.family-tahoma")
+                            price_elem = parent_td.find_element(By.CSS_SELECTOR, SEL_RULE_PRICE)
                             return price_elem.text.strip().replace(",", "") + "元"
                         except:
                             pass
@@ -749,7 +789,7 @@ class DetailPageScraper:
 
         status_text = ""
         try:
-            elem = self.driver.find_element(By.CSS_SELECTOR, "span.firstDesc--G_zP45iR")
+            elem = self.driver.find_element(By.CSS_SELECTOR, SEL_STATUS)
             status_text = elem.text.strip()
         except NoSuchElementException:
             pass
@@ -772,7 +812,7 @@ class DetailPageScraper:
 
     def _extract_basic_info_table(self):
         try:
-            table_a = self.driver.find_element(By.CSS_SELECTOR, "table[pm-ui*='rule-info']")
+            table_a = self.driver.find_element(By.CSS_SELECTOR, SEL_RULE_INFO_TABLE)
             return self._parse_table_to_grid(table_a)
         except NoSuchElementException:
             return []
@@ -895,21 +935,26 @@ class DetailPageScraper:
 # ============================================================
 
 def download_attachment(url, save_path, driver=None):
+    """附件下载：先 requests 直连；失败则带上浏览器 Cookie 重试。"""
     if not url: return False
-    try:
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
-        resp = requests.get(url, headers=headers, timeout=60, stream=True)
-        if resp.status_code == 200:
-            with open(save_path, "wb") as f:
-                for chunk in resp.iter_content(8192): f.write(chunk)
-            return True
-    except: pass
-    if driver:
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    for attempt, extra in enumerate(({}, {"cookie_hook": True}), 1):
+        hdrs = dict(headers)
+        if extra.get("cookie_hook") and driver:
+            try:
+                ck = "; ".join(f"{c['name']}={c['value']}" for c in driver.get_cookies())
+                if ck: hdrs["Cookie"] = ck
+            except: pass
         try:
-            driver.get(url)
-            time.sleep(5)
-            return True
-        except: pass
+            resp = requests.get(url, headers=hdrs, timeout=60, stream=True)
+            if resp.status_code == 200:
+                with open(save_path, "wb") as f:
+                    for chunk in resp.iter_content(8192): f.write(chunk)
+                return True
+            logger.debug(f"附件下载第{attempt}次 HTTP {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"附件下载第{attempt}次异常: {e}")
+    logger.warning(f"附件下载失败: {url[:80]}")
     return False
 
 # ============================================================
@@ -1497,6 +1542,7 @@ def main():
             break
 
     scraper = SfTaobaoScraper(config, browser_type, driver_path)
+    date_range_str = ""
     try:
         scraper.start()
         scraper.run(city, category, district, biz_type, date_start, date_end, mode)
@@ -1504,13 +1550,13 @@ def main():
         scraper.save_summary(date_range_str)
     except KeyboardInterrupt:
         logger.info("用户中断，进度已保存")
-        date_range_str = f"{date_start}_to_{date_end}"
-        scraper.save_summary(date_range_str)
+        if date_range_str:
+            scraper.save_summary(date_range_str)
     except Exception as e:
         logger.error(f"异常退出: {e}")
         import traceback; traceback.print_exc()
-        date_range_str = f"{date_start}_to_{date_end}"
-        scraper.save_summary(date_range_str)
+        if date_range_str:
+            scraper.save_summary(date_range_str)
     finally:
         scraper.stop()
     print("\n✅ 程序结束")

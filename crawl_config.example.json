@@ -1,0 +1,20 @@
+{
+  "cookie": "",
+  "city": "昆明",
+  "category": "住宅用房",
+  "district": "全市",
+  "biz_type": "不限资产类型",
+  "date_start": "2024-01-01",
+  "date_end": "2026-03-31",
+  "mode": "full",
+  "task_status": "not_started",
+  "list_progress": {
+    "last_page": 0,
+    "all_urls": []
+  },
+  "detail_progress": {
+    "visited_urls": [],
+    "saved_count": 0
+  },
+  "last_update": ""
+}
