@@ -2,7 +2,7 @@
 
 [简体中文](README.md)
 
-Collects and organises housing auction data from the Taobao judicial auction platform (sf.taobao.com). Selenium drives a browser past the slider check, requests pulls the detail pages, the crawl resumes after an interruption, and a merge step combines the per-lot txt/csv files into one document.
+Collects and organises housing auction data from the Taobao judicial auction platform (sf.taobao.com). Selenium opens the listing page in a browser (the slider check is solved by hand), requests pulls the detail pages, the crawl resumes after an interruption, and a merge step combines the per-lot txt/csv files into one document.
 
 It began as coursework for an asset valuation class, collecting judicial auction property sales as case material.
 

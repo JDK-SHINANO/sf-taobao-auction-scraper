@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-淘宝司法拍卖平台（sf.taobao.com）的房屋拍卖数据爬取与整理工具。Selenium 驱动浏览器过滑块，requests 抓详情，断点续传，跑完再把每个标的物的 txt/csv 合并成一份。
+淘宝司法拍卖平台（sf.taobao.com）的房屋拍卖数据爬取与整理工具。Selenium 驱动浏览器打开列表页（滑块需手动完成），requests 抓详情，断点续传，跑完再把每个标的物的 txt/csv 合并成一份。
 
 原本是资产评估课程的作业，用来收集法拍房成交案例。
 
