@@ -4,10 +4,6 @@
 
 原本是资产评估课程的作业，用来收集法拍房成交案例。
 
-## 维护状态
-
-课程已结束，2026 年 6 月起不再维护。代码以 GPL-3.0 发布，欢迎 fork 后自行维护。下方「扩展指南」是当时积累的维护要点，供接手者参考。
-
 ## 怎么用
 
 运行环境：Windows 10/11，装 Edge 或 Chrome，Python 3.8+。
@@ -36,33 +32,6 @@ pip install -r requirements.txt
 ### 断点续传
 
 任务中断后重新运行，主菜单会出现「恢复未完成任务」，自动跳过已处理的 URL。进度保存在 `crawl_config.json`。
-
-## 目录
-
-```
-.
-├── README.md
-├── LICENSE
-├── requirements.txt
-├── src/
-│   ├── sf_taobao_scraper.py       主爬虫：列表页 + 详情页，断点续传，反爬拦截
-│   ├── merge_auction.py           合并器：把每个标的物的 txt/csv 合成一份
-│   └── 合并器.bat                  合并器的 Windows 启动脚本（双击运行）
-└── assets/
-    └── crawl_config.example.json  配置模板，复制为根目录的 crawl_config.json 后使用
-```
-
-`crawl_config.json`、`output/`、`urls.txt`、下载的 WebDriver 都在仓库根，且已被 `.gitignore` 排除。
-
-## 依赖
-
-`requirements.txt` 四件：selenium ≥4.0、requests ≥2.25、beautifulsoup4 ≥4.9、lxml ≥4.6。脚本还会用到 Python 标准库里的 tkinter（合并器的目录选择框）。
-
-## 边界
-
-- 滑块验证无法自动通过，需人工介入
-- 详情页依赖站点 DOM 结构，改版后需按「页面改版应对」更新选择器
-- 附件下载对需登录态的链接依赖浏览器 Cookie 转发，部分链接可能仍失败
 
 ### 扩展指南
 
@@ -110,6 +79,39 @@ pip install -r requirements.txt
 - `MIN_DELAY` / `MAX_DELAY`：请求间隔秒数，过短易触发反爬
 - `SUCCESS_KEYWORDS` / `FAIL_KEYWORDS`：成交/流拍判定关键词
 - `DEFAULT_CONFIG`：默认日期范围等，`run_task_selection` 中的默认日期提示需同步修改
+
+## 目录
+
+```
+.
+├── README.md
+├── LICENSE
+├── requirements.txt
+├── src/
+│   ├── sf_taobao_scraper.py       主爬虫：列表页 + 详情页，断点续传，反爬拦截
+│   ├── merge_auction.py           合并器：把每个标的物的 txt/csv 合成一份
+│   └── 合并器.bat                  合并器的 Windows 启动脚本（双击运行）
+└── assets/
+    └── crawl_config.example.json  配置模板，复制为根目录的 crawl_config.json 后使用
+```
+
+`crawl_config.json`、`output/`、`urls.txt`、下载的 WebDriver 都在仓库根，且已被 `.gitignore` 排除。
+
+## 依赖
+
+`requirements.txt` 四件：selenium ≥4.0、requests ≥2.25、beautifulsoup4 ≥4.9、lxml ≥4.6。脚本还会用到 Python 标准库里的 tkinter（合并器的目录选择框）。
+
+## 边界
+
+### 已知局限
+
+- 滑块验证无法自动通过，需人工介入
+- 详情页依赖站点 DOM 结构，改版后需按「页面改版应对」更新选择器
+- 附件下载对需登录态的链接依赖浏览器 Cookie 转发，部分链接可能仍失败
+
+### 维护状态
+
+课程已结束，2026 年 6 月起不再维护。代码以 GPL-3.0 发布，欢迎 fork 后自行维护。“怎么用”一节的「扩展指南」是当时积累的维护要点，供接手者参考。
 
 ### 隐私与合规
 
