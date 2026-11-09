@@ -170,8 +170,8 @@ for _stream in (sys.stdout, sys.stderr):
 # 通用工具函数
 # ============================================================
 
-def get_script_dir():
-    return str(Path(__file__).parent.resolve())
+def get_project_root():
+    return str(Path(__file__).resolve().parent.parent)
 
 def random_delay(low=None, high=None):
     time.sleep(random.uniform(low or MIN_DELAY, high or MAX_DELAY))
@@ -185,13 +185,13 @@ def safe_makedirs(path):
     os.makedirs(path, exist_ok=True)
 
 def get_webdriver_path(browser_type):
-    script_dir = get_script_dir()
+    script_dir = get_project_root()
     if browser_type == "edge":
         return os.path.join(script_dir, "msedgedriver.exe")
     return os.path.join(script_dir, "chromedriver.exe")
 
 def download_chromedriver():
-    script_dir = get_script_dir()
+    script_dir = get_project_root()
     target = os.path.join(script_dir, "chromedriver.exe")
     if os.path.isfile(target):
         return target
@@ -250,7 +250,7 @@ def download_chromedriver():
     return None
 
 def download_edgedriver():
-    script_dir = get_script_dir()
+    script_dir = get_project_root()
     target = os.path.join(script_dir, "msedgedriver.exe")
     if os.path.isfile(target):
         return target
@@ -498,7 +498,7 @@ def _deep_merge(defaults, override):
 class ConfigManager:
     def __init__(self, config_path=None):
         if config_path is None:
-            config_path = os.path.join(get_script_dir(), "crawl_config.json")
+            config_path = os.path.join(get_project_root(), "crawl_config.json")
         self.path = config_path
         self.data = self.load()
 
@@ -970,7 +970,7 @@ class SfTaobaoScraper:
         self.list_scraper = None
         self.detail_scraper = None
         self.stats = {"total_urls": 0, "total_saved": 0, "total_skipped": 0, "total_failed": 0, "start_time": None}
-        self.output_root = os.path.join(get_script_dir(), "output")
+        self.output_root = os.path.join(get_project_root(), "output")
         self.log_handler = None
         self.saved_urls = []
 
@@ -1223,7 +1223,7 @@ class SfTaobaoScraper:
         self._process_details(all_urls, date_range_str)
 
     def _run_detail_only(self, date_range_str):
-        url_file = os.path.join(get_script_dir(), "urls.txt")
+        url_file = os.path.join(get_project_root(), "urls.txt")
         if not os.path.isfile(url_file):
             logger.error(f"urls.txt 不存在")
             return

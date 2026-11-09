@@ -64,7 +64,7 @@ def main():
 
         if not root_dir:
             # 弹窗失败或取消：用脚本所在目录
-            root_dir = os.path.dirname(os.path.abspath(__file__))
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             print(f"使用脚本所在目录: {root_dir}")
 
     if not os.path.isdir(root_dir):
