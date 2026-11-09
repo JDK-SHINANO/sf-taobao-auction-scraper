@@ -59,10 +59,7 @@ try:
 except ImportError:
     HAS_SELENIUM = False
 
-# ============================================================
 # 配置常量
-# ============================================================
-
 ITEMS_PER_PAGE = 40
 MAX_PAGES = 150
 MIN_DELAY = 2.0
@@ -71,9 +68,7 @@ MAX_DELAY = 5.0
 SUCCESS_KEYWORDS = ["本场已结束"]
 FAIL_KEYWORDS = ["本场已流拍，无人出价"]
 
-# ============================================================
 # 页面 CSS 选择器（淘宝前端为 hash 类名，页面改版后失效点集中于此）
-# ============================================================
 SEL_SLIDER_WARNING = "div.warnning-text"          # 滑块验证特征
 SEL_ITEM_LIST_DATA = "sf-item-list-data"         # 列表页 JSON 数据节点 id
 SEL_COUNTDOWN = "span.countdown.J_TimeLeft"      # 成交时间倒计时
@@ -90,10 +85,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
 ]
 
-# ============================================================
 # 城市/房屋类型/资产来源配置
-# ============================================================
-
 CITY_CONFIG = {
     "昆明": {
         "gbk": "%C0%A5%C3%F7",
@@ -150,9 +142,7 @@ BIZ_TYPE_CONFIG = {
     "自行处置": 10,
 }
 
-# ============================================================
 # 日志配置
-# ============================================================
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
                     datefmt="%H:%M:%S")
@@ -166,10 +156,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-# ============================================================
 # 通用工具函数
-# ============================================================
-
 def get_project_root():
     return str(Path(__file__).resolve().parent.parent)
 
@@ -317,10 +304,7 @@ def detect_browser():
     if shutil.which("google-chrome") or shutil.which("chrome"): return "chrome", None
     return None, None
 
-# ============================================================
 # 控制台单键输入
-# ============================================================
-
 def getch():
     if sys.platform == 'win32':
         import msvcrt
@@ -340,10 +324,7 @@ def getch():
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-# ============================================================
 # 统一视觉分隔线函数
-# ============================================================
-
 SEP_DOUBLE = "═" * 60
 SEP_SINGLE = "=" * 30
 
@@ -362,10 +343,7 @@ def print_info_block(title, lines, show_footer=True):
     if show_footer:
         print_section_footer()
 
-# ============================================================
 # 菜单系统（支持分页，优化视觉分隔线）
-# ============================================================
-
 PAGE_SIZE = 8
 
 def menu_select(descriptions, prompt="请选择:", allow_back=True):
@@ -409,10 +387,7 @@ def input_with_default(prompt, default):
     val = input(f"{prompt} (默认为 {default}): ").strip()
     return val if val else default
 
-# ============================================================
 # 统一确认函数（数字键，带视觉分隔线）
-# ============================================================
-
 def confirm(prompt="确认？"):
     while True:
         print_section_header(prompt)
@@ -434,10 +409,7 @@ def confirm(prompt="确认？"):
         else:
             print("无效按键，请重新输入")
 
-# ============================================================
 # URL 生成
-# ============================================================
-
 def build_list_url(city, category, district, biz_type, date_start, date_end):
     city_info = CITY_CONFIG[city]
     gbk_city = city_info["gbk"]
@@ -460,10 +432,7 @@ def build_list_url(city, category, district, biz_type, date_start, date_end):
         params["location_code"] = district_code
     return base + "?" + urllib.parse.urlencode(params)
 
-# ============================================================
 # 配置管理
-# ============================================================
-
 DEFAULT_CONFIG = {
     "cookie": "",
     "city": "昆明",
@@ -548,10 +517,7 @@ class ConfigManager:
         self.data["date_end"] = date_end
         self.save()
 
-# ============================================================
 # 列表页爬取器
-# ============================================================
-
 class ListPageScraper:
     def __init__(self, driver):
         self.driver = driver
@@ -639,10 +605,7 @@ class ListPageScraper:
             })
         return result
 
-# ============================================================
 # 详情页爬取器
-# ============================================================
-
 class DetailPageScraper:
     def __init__(self, driver):
         self.driver = driver
@@ -677,7 +640,6 @@ class DetailPageScraper:
         except TimeoutException:
             return result
 
-        # 检查滑块
         if self._is_blocked():
             return "blocked", result
 
@@ -930,10 +892,7 @@ class DetailPageScraper:
             logger.warning(f"附件提取异常: {e}")
         return atts
 
-# ============================================================
 # 附件下载
-# ============================================================
-
 def download_attachment(url, save_path, driver=None):
     """附件下载：先 requests 直连；失败则带上浏览器 Cookie 重试。"""
     if not url: return False
@@ -957,10 +916,7 @@ def download_attachment(url, save_path, driver=None):
     logger.warning(f"附件下载失败: {url[:80]}")
     return False
 
-# ============================================================
 # 主爬虫控制器
-# ============================================================
-
 class SfTaobaoScraper:
     def __init__(self, config: ConfigManager, browser_type, driver_path):
         self.config = config
@@ -1390,10 +1346,7 @@ class SfTaobaoScraper:
         except:
             pass
 
-# ============================================================
 # ASCII 艺术字
-# ============================================================
-
 BANNER = r"""
       ___           ___                       ___           ___           ___           ___     
      /\  \         /\__\          ___        /\__\         /\  \         /\__\         /\  \    
@@ -1408,10 +1361,7 @@ BANNER = r"""
      \/__/         \/__/                     \/__/         \/__/         \/__/         \/__/    
 """
 
-# ============================================================
 # 依赖安装与主入口
-# ============================================================
-
 def install_dependencies():
     print("正在安装依赖：selenium requests beautifulsoup4 ...")
     try:
