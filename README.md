@@ -8,7 +8,7 @@
 
 课程已结束，2026 年 6 月起不再维护。代码以 GPL-3.0 发布，欢迎 fork 后自行维护。下方「扩展指南」是当时积累的维护要点，供接手者参考。
 
-## 使用方法
+## 怎么用
 
 运行环境：Windows 10/11，装 Edge 或 Chrome，Python 3.8+。
 
@@ -58,13 +58,13 @@ pip install -r requirements.txt
 
 `requirements.txt` 四件：selenium ≥4.0、requests ≥2.25、beautifulsoup4 ≥4.9、lxml ≥4.6。脚本还会用到 Python 标准库里的 tkinter（合并器的目录选择框）。
 
-## 已知局限
+## 边界
 
 - 滑块验证无法自动通过，需人工介入
 - 详情页依赖站点 DOM 结构，改版后需按「页面改版应对」更新选择器
 - 附件下载对需登录态的链接依赖浏览器 Cookie 转发，部分链接可能仍失败
 
-## 扩展指南
+### 扩展指南
 
 所有可配置项集中在 `src/sf_taobao_scraper.py` 顶部常量区，扩展时无需改动业务逻辑。
 
@@ -111,7 +111,7 @@ pip install -r requirements.txt
 - `SUCCESS_KEYWORDS` / `FAIL_KEYWORDS`：成交/流拍判定关键词
 - `DEFAULT_CONFIG`：默认日期范围等，`run_task_selection` 中的默认日期提示需同步修改
 
-## 隐私与合规
+### 隐私与合规
 
 - `crawl_config.json` 包含淘宝账号 Cookie，属个人隐私，已被 .gitignore 排除，请勿上传
 - `output/` 为爬取数据，同样被排除
